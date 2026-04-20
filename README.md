@@ -6,48 +6,60 @@ Different releases of the same film often have slightly different runtimes — l
 
 ---
 
-## Requirements
+## External requirements
 
-- **Python 3.10+**
-- **[ffmpeg](https://ffmpeg.org/download.html)** on PATH (or path set in Advanced options)
-- **[MKVToolNix](https://mkvtoolnix.download/)** (`mkvmerge`) on PATH (or path set in Advanced options)
+The tool requires two external binaries. **These are not bundled** — they must be installed separately.
 
-Quick install on Windows:
-```
-winget install Gyan.FFmpeg
-winget install MKVToolNix.MKVToolNix
-```
+| Tool | Purpose | Install |
+|---|---|---|
+| **ffmpeg** | Audio extraction and frame-rate detection | `winget install Gyan.FFmpeg` |
+| **MKVToolNix** (`mkvmerge`) | Track identification and muxing | `winget install MKVToolNix.MKVToolNix` |
 
-Python dependencies:
+Both must be on PATH, or their paths set manually in Advanced options.
+
+If you're using the standalone `.exe`, the GUI will detect missing tools on launch and offer a **Download ffmpeg** button (automated) and a **Get MKVToolNix** button (opens the download page in your browser).
+
+---
+
+## Running from source
+
 ```
 pip install -r requirements.txt
 ```
 
----
-
-## Usage
-
-### GUI
-
-Run with no arguments:
-
+**GUI** (no arguments):
 ```
 python main.py
 ```
 
-1. **Source file** — the MKV that has the commentary track
-2. **Target file** — the MKV you want to add the commentary to
-3. Select the commentary track from the table
-4. Set an output path (auto-filled from the target filename)
-5. Click **Analyze & Mux**
-
-Both file fields accept drag and drop.
-
-### CLI
-
+**CLI:**
 ```
 python main.py --source <source.mkv> --target <target.mkv> [options]
 ```
+
+---
+
+## Building the standalone exe
+
+```
+build.bat
+```
+
+Output: `dist/mkvsyncdub.exe` (~60 MB). Requires Python + PyInstaller to build, but the resulting exe runs standalone with no Python installation needed.
+
+### CLI from the exe
+
+The exe is built without an attached console so the GUI launches cleanly. When invoked with arguments (CLI mode), it allocates a console window automatically:
+
+```
+mkvsyncdub.exe --source commentary_edition.mkv --target other_edition.mkv
+```
+
+A console window will appear for the duration of the CLI run and close when it exits. This is expected behaviour — it is not a bug.
+
+---
+
+## CLI options
 
 If `--track-id` is omitted, the tool lists available audio tracks and prompts you to choose.
 
@@ -88,7 +100,7 @@ If `--track-id` is omitted, the tool lists available audio tracks and prompts yo
 
 The normalized cross-correlation (NCC) value reflects how similar the two audio waveforms are at each sample point. Different Blu-ray masterings of the same film often have different loudness, EQ, or dynamic range processing, which can push NCC well below 0.5 while still producing the correct lag. The tool accepts any sample with NCC > 0.05 and relies on the 3-point consistency check as the primary quality gate.
 
-If all three points fail (NCC ≤ 0.05), the audio segments are likely silent. Adjust **Sample Start** to land on a section of the film with dialogue.
+If all three points fail (NCC ≤ 0.05), the audio segments are likely silent. Adjust **Sample Start** in Advanced options to land on a section of the film with dialogue.
 
 ---
 
@@ -110,10 +122,13 @@ mkv-commentary-sync/
 ├── main.py                 # Entry point — GUI if no args, CLI otherwise
 ├── core/
 │   ├── detect_offset.py    # Audio extraction + cross-correlation
+│   ├── downloader.py       # ffmpeg auto-download, MKVToolNix browser link
 │   ├── track_utils.py      # mkvmerge --identify parsing, ffprobe helpers
 │   └── mux.py              # mkvmerge command construction + execution
 ├── gui/
 │   ├── main_window.py      # PySide6 main window
 │   └── worker.py           # QThread pipeline worker
+├── mkvsyncdub.spec         # PyInstaller build spec
+├── build.bat               # One-step build script (Windows)
 └── requirements.txt
 ```

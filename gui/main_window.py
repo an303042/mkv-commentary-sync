@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QProgressBar,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -27,7 +29,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTextEdit,
     QToolButton,
-    QProgressBar,
     QVBoxLayout,
     QWidget,
 )
@@ -120,6 +121,25 @@ class LogPanel(QTextEdit):
         self.clear()
 
 
+# ── ffmpeg download thread ────────────────────────────────────────────────────
+
+class _FfmpegDownloadThread(QThread):
+    progress_pct = Signal(int)
+    progress_msg = Signal(str)
+    finished = Signal(bool, str)  # (success, ffmpeg_path or error message)
+
+    def run(self) -> None:
+        from core.downloader import download_ffmpeg
+        try:
+            ffmpeg, _ = download_ffmpeg(
+                progress=self.progress_msg.emit,
+                progress_pct=self.progress_pct.emit,
+            )
+            self.finished.emit(True, ffmpeg)
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QWidget):
@@ -142,17 +162,12 @@ class MainWindow(QWidget):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # Warning banner (hidden until needed)
+        # Warning banner — one row per missing tool, populated by _check_tools()
         self._banner = QFrame()
-        self._banner.setStyleSheet(
-            "QFrame { background: #7c2d12; border-radius: 4px; padding: 6px; }"
-        )
-        banner_layout = QHBoxLayout(self._banner)
-        banner_layout.setContentsMargins(8, 4, 8, 4)
-        self._banner_label = QLabel()
-        self._banner_label.setWordWrap(True)
-        self._banner_label.setStyleSheet("color: #fed7aa;")
-        banner_layout.addWidget(self._banner_label)
+        self._banner.setStyleSheet("QFrame { background: #7c2d12; border-radius: 4px; }")
+        self._banner_layout = QVBoxLayout(self._banner)
+        self._banner_layout.setContentsMargins(10, 6, 10, 6)
+        self._banner_layout.setSpacing(4)
         self._banner.hide()
         root.addWidget(self._banner)
 
@@ -287,19 +302,81 @@ class MainWindow(QWidget):
     # ── Tool startup check ────────────────────────────────────────────────────
 
     def _check_tools(self) -> None:
-        missing = []
-        if not check_tool("ffmpeg"):
-            missing.append("ffmpeg")
-        if not check_tool("mkvmerge"):
-            missing.append("mkvmerge")
+        # Clear previous rows
+        while self._banner_layout.count():
+            item = self._banner_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
-        if missing:
-            tools_str = " and ".join(missing)
-            self._banner_label.setText(
-                f"⚠  {tools_str} not found on PATH. "
-                "Set the path(s) in Advanced options or install them."
-            )
+        ffmpeg_path = self._ffmpeg_edit.text().strip() or "ffmpeg"
+        mkvmerge_path = self._mkvmerge_edit.text().strip() or "mkvmerge"
+
+        rows = []
+        if not check_tool(ffmpeg_path):
+            rows.append(("ffmpeg", "Download ffmpeg", self._on_download_ffmpeg))
+        if not check_tool(mkvmerge_path):
+            rows.append(("mkvmerge", "Get MKVToolNix →", self._on_open_mkvtoolnix))
+
+        if rows:
+            for tool, btn_label, handler in rows:
+                row = QWidget()
+                row.setStyleSheet("background: transparent;")
+                rl = QHBoxLayout(row)
+                rl.setContentsMargins(0, 0, 0, 0)
+                lbl = QLabel(f"⚠  {tool} not found on PATH — set path in Advanced, or:")
+                lbl.setStyleSheet("color: #fed7aa;")
+                rl.addWidget(lbl)
+                rl.addStretch()
+                btn = QPushButton(btn_label)
+                btn.setStyleSheet(
+                    "QPushButton { background: #c2410c; color: white; border-radius: 3px;"
+                    "  padding: 2px 10px; border: none; }"
+                    "QPushButton:hover { background: #ea580c; }"
+                )
+                btn.clicked.connect(handler)
+                rl.addWidget(btn)
+                self._banner_layout.addWidget(row)
             self._banner.show()
+        else:
+            self._banner.hide()
+
+    # ── Binary download handlers ──────────────────────────────────────────────
+
+    def _on_download_ffmpeg(self) -> None:
+        dlg = QProgressDialog("Downloading ffmpeg (~75 MB)…", None, 0, 100, self)
+        dlg.setWindowTitle("Downloading ffmpeg")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+
+        self._ffmpeg_dl_thread = _FfmpegDownloadThread(self)
+        self._ffmpeg_dl_thread.progress_pct.connect(dlg.setValue)
+        self._ffmpeg_dl_thread.progress_msg.connect(dlg.setLabelText)
+        self._ffmpeg_dl_thread.finished.connect(
+            lambda ok, result: self._on_ffmpeg_download_done(ok, result, dlg)
+        )
+        self._ffmpeg_dl_thread.start()
+
+    def _on_ffmpeg_download_done(self, success: bool, result: str, dlg: QProgressDialog) -> None:
+        dlg.close()
+        if success:
+            self._ffmpeg_edit.setText(result)
+            self._check_tools()
+        else:
+            # Re-use banner to show the error
+            while self._banner_layout.count():
+                item = self._banner_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            lbl = QLabel(f"✗  ffmpeg download failed: {result}")
+            lbl.setStyleSheet("color: #fca5a5;")
+            lbl.setWordWrap(True)
+            self._banner_layout.addWidget(lbl)
+            self._banner.show()
+
+    def _on_open_mkvtoolnix(self) -> None:
+        from core.downloader import open_mkvtoolnix_page
+        open_mkvtoolnix_page()
 
     # ── File pickers ──────────────────────────────────────────────────────────
 

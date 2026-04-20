@@ -10,7 +10,19 @@ import os
 import sys
 
 
+def _attach_console_if_needed() -> None:
+    """When running as a windowed exe, spin up a console for CLI output."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    import ctypes
+    ctypes.windll.kernel32.AllocConsole()
+    sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+    sys.stderr = open("CONOUT$", "w", encoding="utf-8")
+    sys.stdin  = open("CONIN$",  "r", encoding="utf-8")
+
+
 def _run_cli(args: argparse.Namespace) -> int:
+    _attach_console_if_needed()
     from rich.console import Console
     from rich.table import Table
 
