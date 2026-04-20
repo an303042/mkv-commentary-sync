@@ -1,7 +1,10 @@
 import json
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 @dataclass
@@ -23,6 +26,7 @@ def identify_tracks(
             capture_output=True,
             text=True,
             timeout=30,
+            creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
         raise RuntimeError(
@@ -84,6 +88,7 @@ def get_file_duration(mkv_path: str, ffprobe_path: str = "ffprobe") -> float:
             capture_output=True,
             text=True,
             timeout=30,
+            creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
         raise RuntimeError(
@@ -114,6 +119,7 @@ def get_frame_rate(mkv_path: str, ffprobe_path: str = "ffprobe") -> float:
             capture_output=True,
             text=True,
             timeout=30,
+            creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
         raise RuntimeError(
@@ -143,6 +149,7 @@ def check_tool(path: str) -> bool:
             [path, "--version"],
             capture_output=True,
             timeout=10,
+            creationflags=_NO_WINDOW,
         )
         return True
     except (FileNotFoundError, OSError):

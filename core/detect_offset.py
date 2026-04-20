@@ -2,8 +2,11 @@
 
 import os
 import subprocess
+import sys
 import tempfile
 from typing import Callable, Optional, Tuple
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 import numpy as np
 import scipy.io.wavfile
@@ -53,6 +56,7 @@ def extract_audio_segment(
             capture_output=True,
             text=True,
             timeout=120,
+            creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
         raise RuntimeError(

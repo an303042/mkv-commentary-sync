@@ -2,7 +2,10 @@
 
 import re
 import subprocess
+import sys
 from typing import Callable, List, Optional
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # Lines from mkvmerge stdout that add no value to the user
 _FILTER_PATTERNS = [
@@ -85,6 +88,7 @@ def run_mux(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=0,
+            creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
         raise RuntimeError(
