@@ -1,0 +1,489 @@
+"""PySide6 main window for the MKV Commentary Sync tool."""
+
+import os
+import subprocess
+import sys
+
+from PySide6.QtCore import Qt, QThread
+from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QFont
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QButtonGroup,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QToolButton,
+    QProgressBar,
+    QVBoxLayout,
+    QWidget,
+)
+
+from core.track_utils import AudioTrack, check_tool, identify_tracks
+from gui.worker import PipelineWorker, WorkerParams
+
+
+# ── Drag-and-drop QLineEdit ───────────────────────────────────────────────────
+
+class MkvLineEdit(QLineEdit):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setAcceptDrops(True)
+        self.setPlaceholderText("Path to .mkv file…")
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if path.lower().endswith(".mkv"):
+                self.setText(path)
+            else:
+                self.setText(path)  # accept non-mkv with no special handling
+        else:
+            super().dropEvent(event)
+
+
+# ── Collapsible section ───────────────────────────────────────────────────────
+
+class CollapsibleSection(QWidget):
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._toggle = QToolButton(text=f"▶  {title}", checkable=True, checked=False)
+        self._toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
+        self._toggle.clicked.connect(self._on_toggle)
+        self._content = QWidget()
+        self._content.setVisible(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(self._toggle)
+        layout.addWidget(self._content)
+
+    def setContentLayout(self, layout) -> None:
+        self._content.setLayout(layout)
+
+    def _on_toggle(self, checked: bool) -> None:
+        self._content.setVisible(checked)
+        self._toggle.setText(
+            f"{'▼' if checked else '▶'}  {self._toggle.text()[3:]}"
+        )
+
+
+# ── Log panel ─────────────────────────────────────────────────────────────────
+
+_LEVEL_COLORS = {
+    "success": "#22c55e",
+    "warning": "#f59e0b",
+    "error":   "#ef4444",
+    "info":    "#e2e8f0",
+}
+
+
+class LogPanel(QTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setFont(QFont("Consolas, Courier New, monospace", 9))
+        self.setStyleSheet(
+            "QTextEdit { background: #1e293b; color: #e2e8f0; border-radius: 4px; padding: 6px; }"
+        )
+        self.setMinimumHeight(160)
+
+    def append_message(self, msg: str, level: str = "info") -> None:
+        color = _LEVEL_COLORS.get(level, _LEVEL_COLORS["info"])
+        # Escape HTML special chars
+        msg = msg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        self.append(f'<span style="color:{color};">{msg}</span>')
+        self.ensureCursorVisible()
+
+    def clear_log(self) -> None:
+        self.clear()
+
+
+# ── Main window ───────────────────────────────────────────────────────────────
+
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("MKV Commentary Sync")
+        self.setMinimumWidth(720)
+
+        self._worker: QThread | None = None
+        self._tracks: list[AudioTrack] = []
+        self._radio_group = QButtonGroup(self)
+
+        self._build_ui()
+        self._check_tools()
+
+    # ── UI construction ───────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        # Warning banner (hidden until needed)
+        self._banner = QFrame()
+        self._banner.setStyleSheet(
+            "QFrame { background: #7c2d12; border-radius: 4px; padding: 6px; }"
+        )
+        banner_layout = QHBoxLayout(self._banner)
+        banner_layout.setContentsMargins(8, 4, 8, 4)
+        self._banner_label = QLabel()
+        self._banner_label.setWordWrap(True)
+        self._banner_label.setStyleSheet("color: #fed7aa;")
+        banner_layout.addWidget(self._banner_label)
+        self._banner.hide()
+        root.addWidget(self._banner)
+
+        # ── Section 1: Files ──────────────────────────────────────────────────
+        files_box = QGroupBox("Files")
+        files_layout = QGridLayout(files_box)
+        files_layout.setColumnStretch(1, 1)
+
+        files_layout.addWidget(QLabel("Source file (has the commentary):"), 0, 0)
+        self._source_edit = MkvLineEdit()
+        files_layout.addWidget(self._source_edit, 0, 1)
+        src_browse = QPushButton("Browse")
+        src_browse.clicked.connect(lambda: self._browse_mkv(self._source_edit))
+        files_layout.addWidget(src_browse, 0, 2)
+
+        files_layout.addWidget(QLabel("Target file (to mux into):"), 1, 0)
+        self._target_edit = MkvLineEdit()
+        files_layout.addWidget(self._target_edit, 1, 1)
+        tgt_browse = QPushButton("Browse")
+        tgt_browse.clicked.connect(lambda: self._browse_mkv(self._target_edit))
+        files_layout.addWidget(tgt_browse, 1, 2)
+
+        self._source_edit.textChanged.connect(self._on_files_changed)
+        self._target_edit.textChanged.connect(self._on_files_changed)
+
+        root.addWidget(files_box)
+
+        # ── Section 2: Track Selection ────────────────────────────────────────
+        tracks_box = QGroupBox("Track Selection")
+        tracks_layout = QVBoxLayout(tracks_box)
+
+        self._track_table = QTableWidget(0, 6)
+        self._track_table.setHorizontalHeaderLabels(
+            ["Select", "Track ID", "Language", "Codec", "Channels", "Name"]
+        )
+        self._track_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self._track_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._track_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._track_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._track_table.setEnabled(False)
+        tracks_layout.addWidget(self._track_table)
+
+        root.addWidget(tracks_box)
+
+        # ── Section 3: Output & Options ───────────────────────────────────────
+        output_box = QGroupBox("Output & Options")
+        output_layout = QVBoxLayout(output_box)
+
+        out_row = QGridLayout()
+        out_row.setColumnStretch(1, 1)
+        out_row.addWidget(QLabel("Output file:"), 0, 0)
+        self._output_edit = QLineEdit()
+        self._output_edit.setPlaceholderText("Output .mkv path…")
+        out_row.addWidget(self._output_edit, 0, 1)
+        out_browse = QPushButton("Browse")
+        out_browse.clicked.connect(self._browse_output)
+        out_row.addWidget(out_browse, 0, 2)
+        output_layout.addLayout(out_row)
+
+        # Collapsible advanced
+        adv = CollapsibleSection("Advanced")
+        adv_form = QGridLayout()
+        adv_form.setContentsMargins(12, 4, 4, 4)
+        adv_form.setColumnStretch(1, 1)
+
+        self._sample_start = QSpinBox()
+        self._sample_start.setRange(0, 7200)
+        self._sample_start.setValue(120)
+        self._sample_start.setSuffix(" s")
+
+        self._sample_duration = QSpinBox()
+        self._sample_duration.setRange(10, 3600)
+        self._sample_duration.setValue(300)
+        self._sample_duration.setSuffix(" s")
+
+        self._sample_rate = QSpinBox()
+        self._sample_rate.setRange(4000, 44100)
+        self._sample_rate.setValue(8000)
+        self._sample_rate.setSuffix(" Hz")
+
+        self._ffmpeg_edit = QLineEdit("ffmpeg")
+        self._mkvmerge_edit = QLineEdit("mkvmerge")
+
+        for row, (label, widget) in enumerate([
+            ("Sample start:", self._sample_start),
+            ("Sample duration:", self._sample_duration),
+            ("Sample rate:", self._sample_rate),
+            ("ffmpeg path:", self._ffmpeg_edit),
+            ("mkvmerge path:", self._mkvmerge_edit),
+        ]):
+            adv_form.addWidget(QLabel(label), row, 0)
+            adv_form.addWidget(widget, row, 1)
+
+        adv.setContentLayout(adv_form)
+        output_layout.addWidget(adv)
+        root.addWidget(output_box)
+
+        # ── Section 4: Action & Progress ─────────────────────────────────────
+        action_box = QGroupBox()
+        action_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        action_layout = QVBoxLayout(action_box)
+
+        self._run_btn = QPushButton("Analyze && Mux")
+        self._run_btn.setMinimumHeight(36)
+        self._run_btn.setStyleSheet(
+            "QPushButton { background: #2563eb; color: white; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background: #1d4ed8; }"
+            "QPushButton:disabled { background: #475569; color: #94a3b8; }"
+        )
+        self._run_btn.clicked.connect(self._on_run)
+        action_layout.addWidget(self._run_btn)
+
+        self._mux_progress_bar = QProgressBar()
+        self._mux_progress_bar.setRange(0, 100)
+        self._mux_progress_bar.setTextVisible(True)
+        self._mux_progress_bar.setFormat("Muxing… %p%")
+        self._mux_progress_bar.hide()
+        action_layout.addWidget(self._mux_progress_bar)
+
+        self._log_panel = LogPanel()
+        self._log_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._log_panel.hide()
+        action_layout.addWidget(self._log_panel)
+
+        self._open_folder_btn = QPushButton("Open output folder")
+        self._open_folder_btn.hide()
+        self._open_folder_btn.clicked.connect(self._open_output_folder)
+        action_layout.addWidget(self._open_folder_btn)
+
+        root.addWidget(action_box)
+
+    # ── Tool startup check ────────────────────────────────────────────────────
+
+    def _check_tools(self) -> None:
+        missing = []
+        if not check_tool("ffmpeg"):
+            missing.append("ffmpeg")
+        if not check_tool("mkvmerge"):
+            missing.append("mkvmerge")
+
+        if missing:
+            tools_str = " and ".join(missing)
+            self._banner_label.setText(
+                f"⚠  {tools_str} not found on PATH. "
+                "Set the path(s) in Advanced options or install them."
+            )
+            self._banner.show()
+
+    # ── File pickers ──────────────────────────────────────────────────────────
+
+    def _browse_mkv(self, edit: QLineEdit) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select MKV file", "", "MKV files (*.mkv);;All files (*)"
+        )
+        if path:
+            edit.setText(path)
+
+    def _browse_output(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save output as", "", "MKV files (*.mkv)"
+        )
+        if path:
+            if not path.lower().endswith(".mkv"):
+                path += ".mkv"
+            self._output_edit.setText(path)
+
+    # ── Files-changed handler ─────────────────────────────────────────────────
+
+    def _on_files_changed(self, _text: str = "") -> None:
+        source = self._source_edit.text().strip()
+        target = self._target_edit.text().strip()
+
+        if source and os.path.isfile(source):
+            # Only reload tracks when the source path itself changes
+            if source != getattr(self, "_loaded_source", None):
+                self._load_tracks(source)
+        else:
+            self._clear_tracks()
+            self._loaded_source = None
+
+        # Auto-populate output path when target is set
+        if target and os.path.isfile(target) and not self._output_edit.text().strip():
+            base, _ = os.path.splitext(target)
+            self._output_edit.setText(base + "_with_commentary.mkv")
+
+    def _load_tracks(self, source_path: str) -> None:
+        mkvmerge = self._mkvmerge_edit.text().strip() or "mkvmerge"
+        try:
+            tracks = identify_tracks(source_path, mkvmerge)
+        except Exception as exc:
+            self._clear_tracks()
+            self._banner_label.setText(f"⚠  Could not identify tracks: {exc}")
+            self._banner.show()
+            return
+
+        self._loaded_source = source_path
+        self._tracks = tracks
+        self._populate_track_table(tracks)
+
+    def _populate_track_table(self, tracks: list[AudioTrack]) -> None:
+        # Clear existing radio buttons from group
+        for btn in self._radio_group.buttons():
+            self._radio_group.removeButton(btn)
+
+        self._track_table.setRowCount(len(tracks))
+        self._track_table.setEnabled(bool(tracks))
+
+        for row, track in enumerate(tracks):
+            radio = QRadioButton()
+            if row == 0:
+                radio.setChecked(True)
+            self._radio_group.addButton(radio, row)
+
+            cell_widget = QWidget()
+            cell_layout = QHBoxLayout(cell_widget)
+            cell_layout.addWidget(radio)
+            cell_layout.setAlignment(Qt.AlignCenter)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            self._track_table.setCellWidget(row, 0, cell_widget)
+
+            for col, value in enumerate(
+                [
+                    str(track.track_id),
+                    track.language,
+                    track.codec,
+                    str(track.channels) if track.channels else "",
+                    track.name,
+                ],
+                start=1,
+            ):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                self._track_table.setItem(row, col, item)
+
+        self._track_table.resizeColumnsToContents()
+        self._track_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+
+    def _clear_tracks(self) -> None:
+        for btn in self._radio_group.buttons():
+            self._radio_group.removeButton(btn)
+        self._track_table.setRowCount(0)
+        self._track_table.setEnabled(False)
+        self._tracks = []
+
+    # ── Run pipeline ──────────────────────────────────────────────────────────
+
+    def _selected_track_id(self) -> int | None:
+        checked_id = self._radio_group.checkedId()
+        if checked_id < 0 or checked_id >= len(self._tracks):
+            return None
+        return self._tracks[checked_id].track_id
+
+    def _on_run(self) -> None:
+        source = self._source_edit.text().strip()
+        target = self._target_edit.text().strip()
+        output = self._output_edit.text().strip()
+
+        errors = []
+        if not source or not os.path.isfile(source):
+            errors.append("Source file not found.")
+        if not target or not os.path.isfile(target):
+            errors.append("Target file not found.")
+        if not output:
+            errors.append("Output path is required.")
+        if not self._tracks:
+            errors.append("No audio tracks loaded from source file.")
+
+        track_id = self._selected_track_id()
+        if track_id is None:
+            errors.append("No track selected.")
+
+        if errors:
+            self._log_panel.show()
+            self._log_panel.clear_log()
+            for e in errors:
+                self._log_panel.append_message(f"✗ {e}", "error")
+            return
+
+        params = WorkerParams(
+            source_path=source,
+            target_path=target,
+            track_id=track_id,
+            output_path=output,
+            sample_start=self._sample_start.value(),
+            sample_duration=self._sample_duration.value(),
+            sample_rate=self._sample_rate.value(),
+            ffmpeg_path=self._ffmpeg_edit.text().strip() or "ffmpeg",
+            ffprobe_path="ffprobe",
+            mkvmerge_path=self._mkvmerge_edit.text().strip() or "mkvmerge",
+        )
+
+        self._log_panel.show()
+        self._log_panel.clear_log()
+        self._open_folder_btn.hide()
+        self._mux_progress_bar.setValue(0)
+        self._mux_progress_bar.hide()
+        self._run_btn.setEnabled(False)
+        self._run_btn.setText("Processing…")
+
+        self._worker = PipelineWorker(params, parent=self)
+        self._worker.log.connect(self._on_log)
+        self._worker.mux_progress.connect(self._on_mux_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.start()
+
+    def _on_log(self, msg: str, level: str) -> None:
+        self._log_panel.append_message(msg, level)
+
+    def _on_mux_progress(self, pct: int) -> None:
+        if not self._mux_progress_bar.isVisible():
+            self._mux_progress_bar.show()
+        self._mux_progress_bar.setValue(pct)
+
+    def _on_finished(self, success: bool, info: str) -> None:
+        self._run_btn.setEnabled(True)
+        self._run_btn.setText("Analyze && Mux")
+        self._mux_progress_bar.hide()
+        self._mux_progress_bar.setValue(0)
+        if success:
+            self._output_path = info
+            self._open_folder_btn.show()
+        self._worker = None
+
+    def _open_output_folder(self) -> None:
+        path = getattr(self, "_output_path", None)
+        if not path:
+            return
+        folder = os.path.dirname(os.path.abspath(path))
+        if sys.platform == "win32":
+            os.startfile(folder)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", folder])
+        else:
+            subprocess.Popen(["xdg-open", folder])
