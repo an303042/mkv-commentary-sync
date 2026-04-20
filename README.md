@@ -6,6 +6,12 @@ Different releases of the same film often have slightly different runtimes — l
 
 ---
 
+## Download
+
+**[→ Download the latest release](../../releases/latest)** — grab `mkvsyncdub.exe` from the Assets section. No Python installation required.
+
+---
+
 ## External requirements
 
 The tool requires two external binaries. **These are not bundled** — they must be installed separately.
@@ -40,6 +46,8 @@ python main.py --source <source.mkv> --target <target.mkv> [options]
 ---
 
 ## Building the standalone exe
+
+Most users should just **[download the release](#download)** instead. Build from source only if you need a custom build or want to contribute.
 
 ```
 build.bat

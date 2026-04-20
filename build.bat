@@ -4,7 +4,7 @@ pip install --upgrade pyinstaller pyinstaller-hooks-contrib
 
 echo.
 echo Building mkvsyncdub.exe...
-pyinstaller mkvsyncdub.spec --clean
+python -m PyInstaller mkvsyncdub.spec --clean
 
 echo.
 if exist dist\mkvsyncdub.exe (
