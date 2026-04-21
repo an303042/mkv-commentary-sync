@@ -8,7 +8,17 @@ Different releases of the same film often have slightly different runtimes — l
 
 ## Download
 
-**[→ Download the latest release](../../releases/latest)** — grab `mkvsyncdub.exe` from the Assets section. No Python installation required.
+**[→ Download the latest release](../../releases/latest)** — grab the binary for your platform from the Assets section. No Python installation required.
+
+| Platform | File |
+|---|---|
+| Windows | `mkvsyncdub-windows.exe` |
+| macOS | `mkvsyncdub-macos` |
+| Linux | `mkvsyncdub-linux` |
+
+> **macOS:** The first time you open the app, macOS will block it because it isn't notarized. Right-click the file → **Open** → **Open** to bypass this once. After that it opens normally.
+>
+> **Linux:** Make the binary executable before running: `chmod +x mkvsyncdub-linux`
 
 ---
 
@@ -16,14 +26,14 @@ Different releases of the same film often have slightly different runtimes — l
 
 The tool requires two external binaries. **These are not bundled** — they must be installed separately.
 
-| Tool | Purpose | Install |
-|---|---|---|
-| **ffmpeg** | Audio extraction and frame-rate detection | `winget install Gyan.FFmpeg` |
-| **MKVToolNix** (`mkvmerge`) | Track identification and muxing | `winget install MKVToolNix.MKVToolNix` |
+| Tool | Purpose | Windows | macOS | Linux |
+|---|---|---|---|---|
+| **ffmpeg** | Audio extraction and frame-rate detection | `winget install Gyan.FFmpeg` | `brew install ffmpeg` | `sudo apt install ffmpeg` |
+| **MKVToolNix** (`mkvmerge`) | Track identification and muxing | `winget install MKVToolNix.MKVToolNix` | `brew install mkvtoolnix` | `sudo apt install mkvtoolnix` |
 
-Both must be on PATH, or their paths set manually in Advanced options.
+Both must be on PATH, or their paths set manually in the Advanced panel.
 
-If you're using the standalone `.exe`, the GUI will detect missing tools on launch and offer a **Download ffmpeg** button (automated) and a **Get MKVToolNix** button (opens the download page in your browser).
+On Windows, if you're using the standalone `.exe`, the GUI will detect missing tools on launch and offer a **Download ffmpeg** button (automated) and a **Get MKVToolNix** button (opens the download page).
 
 ---
 
@@ -45,25 +55,15 @@ python main.py --source <source.mkv> --target <target.mkv> [options]
 
 ---
 
-## Building the standalone exe
+## Building the standalone binaries
 
-Most users should just **[download the release](#download)** instead. Build from source only if you need a custom build or want to contribute.
+Releases are built automatically via GitHub Actions on every version tag — no local build needed to ship.
 
+To build locally on Windows:
 ```
 build.bat
 ```
-
-Output: `dist/mkvsyncdub.exe` (~60 MB). Requires Python + PyInstaller to build, but the resulting exe runs standalone with no Python installation needed.
-
-### CLI from the exe
-
-The exe is built without an attached console so the GUI launches cleanly. When invoked with arguments (CLI mode), it allocates a console window automatically:
-
-```
-mkvsyncdub.exe --source commentary_edition.mkv --target other_edition.mkv
-```
-
-A console window will appear for the duration of the CLI run and close when it exits. This is expected behaviour — it is not a bug.
+Output: `dist/mkvsyncdub.exe`
 
 ---
 
@@ -136,7 +136,9 @@ mkv-commentary-sync/
 ├── gui/
 │   ├── main_window.py      # PySide6 main window
 │   └── worker.py           # QThread pipeline worker
+├── .github/workflows/
+│   └── release.yml         # Builds Windows/macOS/Linux binaries on tag push
 ├── mkvsyncdub.spec         # PyInstaller build spec
-├── build.bat               # One-step build script (Windows)
+├── build.bat               # Local Windows build script
 └── requirements.txt
 ```
