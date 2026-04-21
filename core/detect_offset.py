@@ -1,9 +1,12 @@
 """Audio extraction and cross-correlation offset detection."""
 
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Callable, Optional, Tuple
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -11,6 +14,10 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 import numpy as np
 import scipy.io.wavfile
 from scipy.signal import correlate, correlation_lags
+
+
+class CancellationError(Exception):
+    pass
 
 
 # NCC below this almost certainly means broken or silent audio — exclude the sample
@@ -39,9 +46,10 @@ def extract_audio_segment(
     sample_rate: int,
     output_path: str,
     ffmpeg_path: str = "ffmpeg",
+    cancel_event: Optional[threading.Event] = None,
 ) -> None:
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [
                 ffmpeg_path,
                 "-y",
@@ -53,9 +61,9 @@ def extract_audio_segment(
                 "-ar", str(sample_rate),
                 output_path,
             ],
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=120,
             creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
@@ -64,8 +72,22 @@ def extract_audio_segment(
             "Install ffmpeg: https://ffmpeg.org/download.html"
         )
 
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg audio extraction failed:\n{result.stderr[-2000:]}")
+    while True:
+        try:
+            proc.wait(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            if cancel_event and cancel_event.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                raise CancellationError()
+
+    if proc.returncode != 0:
+        stderr_text = proc.stderr.read()
+        raise RuntimeError(f"ffmpeg audio extraction failed:\n{stderr_text[-2000:]}")
 
 
 def _load_wav_mono(path: str) -> Tuple[int, np.ndarray]:
@@ -127,6 +149,7 @@ def detect_offset(
     ffprobe_path: str = "ffprobe",
     mkvmerge_path: str = "mkvmerge",
     progress: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> int:
     """
     Run 3-point cross-correlation to find the timing offset in milliseconds.
@@ -142,7 +165,12 @@ def detect_offset(
         if progress:
             progress(msg)
 
+    def check_cancel() -> None:
+        if cancel_event and cancel_event.is_set():
+            raise CancellationError()
+
     # ── Frame-rate sanity check ───────────────────────────────────────────────
+    check_cancel()
     src_fps = get_frame_rate(source_path, ffprobe_path)
     tgt_fps = get_frame_rate(target_path, ffprobe_path)
     if abs(src_fps - tgt_fps) > 0.01:
@@ -180,23 +208,30 @@ def detect_offset(
 
     offsets_ms: list[int] = []
     point_labels: list[str] = []
-    tmpdir = tempfile.gettempdir()
 
-    for i, start in enumerate(points):
-        time_label = _seconds_to_hms(start)
-        point_labels.append(time_label)
-        log(f"⟳ Point {i+1} ({time_label})…")
+    # Unique temp dir per run: prefix includes a sanitised fragment of the
+    # source filename so it's identifiable in task manager / temp dir listings.
+    src_stem = re.sub(r"[^\w]", "_", os.path.splitext(os.path.basename(source_path))[0])[:20]
+    tmpdir = tempfile.mkdtemp(prefix=f"dubsync_{src_stem}_")
 
-        src_wav = os.path.join(tmpdir, f"_dubsync_src_{i}.wav")
-        tgt_wav = os.path.join(tmpdir, f"_dubsync_tgt_{i}.wav")
+    try:
+        for i, start in enumerate(points):
+            check_cancel()
 
-        try:
-            extract_audio_segment(source_path, start, sample_duration, sample_rate, src_wav, ffmpeg_path)
-            extract_audio_segment(target_path, start, sample_duration, sample_rate, tgt_wav, ffmpeg_path)
+            time_label = _seconds_to_hms(start)
+            point_labels.append(time_label)
+            log(f"⟳ Point {i+1} ({time_label})…")
+
+            src_wav = os.path.join(tmpdir, f"src_{i}.wav")
+            tgt_wav = os.path.join(tmpdir, f"tgt_{i}.wav")
+
+            extract_audio_segment(source_path, start, sample_duration, sample_rate, src_wav, ffmpeg_path, cancel_event)
+            extract_audio_segment(target_path, start, sample_duration, sample_rate, tgt_wav, ffmpeg_path, cancel_event)
 
             _, src_data = _load_wav_mono(src_wav)
             _, tgt_data = _load_wav_mono(tgt_wav)
 
+            # Threshold calibrated for int16 PCM (range ±32767)
             silence_threshold = 50.0
             src_rms = _rms(src_data)
             tgt_rms = _rms(tgt_data)
@@ -209,19 +244,18 @@ def detect_offset(
             offset_ms = round((lag / sample_rate) * 1000)
 
             if confidence < CONFIDENCE_MINIMUM:
-                log(f"  ✗ NCC {confidence:.2f} — audio appears silent or corrupt, excluded")
+                log(
+                    f"  ✗ NCC {confidence:.2f} — audio appears silent or corrupt, excluded. "
+                    "If multiple points fail, adjust Sample Start in Advanced to a section "
+                    "with dialogue."
+                )
             else:
                 offsets_ms.append(offset_ms)
-                quality = "" if confidence >= CONFIDENCE_THRESHOLD else f"  ⚠ low NCC: {confidence:.2f}"
-                ncc_str = f"{confidence:.2f}" if confidence >= CONFIDENCE_THRESHOLD else ""
-                conf_display = f"NCC {confidence:.2f}" if confidence >= CONFIDENCE_THRESHOLD else f"NCC {confidence:.2f} ⚠"
+                conf_display = f"NCC {confidence:.2f}" + ("" if confidence >= CONFIDENCE_THRESHOLD else " ⚠")
                 log(f"  → {offset_ms:+d} ms  ({conf_display})")
-        finally:
-            for p in (src_wav, tgt_wav):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     if not offsets_ms:
         raise RuntimeError(
@@ -244,7 +278,7 @@ def detect_offset(
                 "(extended scene, alternate cut). A single delay cannot fix sync."
             )
 
-    final_offset = int(np.median(offsets_ms))
+    final_offset = round(float(np.median(offsets_ms)))
     log(f"✓ Offset: {final_offset:+d} ms")
 
     if abs(final_offset) > 30_000:

@@ -4,11 +4,10 @@ import os
 import subprocess
 import sys
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QFont
+from PySide6.QtCore import QSettings, Qt, QThread, Signal
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QButtonGroup,
     QFileDialog,
     QFrame,
@@ -18,11 +17,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QProgressDialog,
     QPushButton,
     QRadioButton,
-    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTableWidget,
@@ -54,11 +53,7 @@ class MkvLineEdit(QLineEdit):
     def dropEvent(self, event: QDropEvent) -> None:
         urls = event.mimeData().urls()
         if urls:
-            path = urls[0].toLocalFile()
-            if path.lower().endswith(".mkv"):
-                self.setText(path)
-            else:
-                self.setText(path)  # accept non-mkv with no special handling
+            self.setText(urls[0].toLocalFile())
         else:
             super().dropEvent(event)
 
@@ -68,6 +63,7 @@ class MkvLineEdit(QLineEdit):
 class CollapsibleSection(QWidget):
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
+        self._title = title
         self._toggle = QToolButton(text=f"▶  {title}", checkable=True, checked=False)
         self._toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
         self._toggle.clicked.connect(self._on_toggle)
@@ -85,9 +81,7 @@ class CollapsibleSection(QWidget):
 
     def _on_toggle(self, checked: bool) -> None:
         self._content.setVisible(checked)
-        self._toggle.setText(
-            f"{'▼' if checked else '▶'}  {self._toggle.text()[3:]}"
-        )
+        self._toggle.setText(f"{'▼' if checked else '▶'}  {self._title}")
 
 
 # ── Log panel ─────────────────────────────────────────────────────────────────
@@ -112,7 +106,6 @@ class LogPanel(QTextEdit):
 
     def append_message(self, msg: str, level: str = "info") -> None:
         color = _LEVEL_COLORS.get(level, _LEVEL_COLORS["info"])
-        # Escape HTML special chars
         msg = msg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         self.append(f'<span style="color:{color};">{msg}</span>')
         self.ensureCursorVisible()
@@ -151,8 +144,10 @@ class MainWindow(QWidget):
         self._worker: QThread | None = None
         self._tracks: list[AudioTrack] = []
         self._radio_group = QButtonGroup(self)
+        self._settings = QSettings("mkvsyncdub", "mkvsyncdub")
 
         self._build_ui()
+        self._restore_settings()
         self._check_tools()
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -162,7 +157,7 @@ class MainWindow(QWidget):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # Warning banner — one row per missing tool, populated by _check_tools()
+        # Warning banner — populated dynamically by _check_tools / _load_tracks
         self._banner = QFrame()
         self._banner.setStyleSheet("QFrame { background: #7c2d12; border-radius: 4px; }")
         self._banner_layout = QVBoxLayout(self._banner)
@@ -270,6 +265,8 @@ class MainWindow(QWidget):
         action_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         action_layout = QVBoxLayout(action_box)
 
+        # Button row: [Analyze & Mux (stretches)] [Cancel]
+        btn_row = QHBoxLayout()
         self._run_btn = QPushButton("Analyze && Mux")
         self._run_btn.setMinimumHeight(36)
         self._run_btn.setStyleSheet(
@@ -278,7 +275,28 @@ class MainWindow(QWidget):
             "QPushButton:disabled { background: #475569; color: #94a3b8; }"
         )
         self._run_btn.clicked.connect(self._on_run)
-        action_layout.addWidget(self._run_btn)
+        btn_row.addWidget(self._run_btn, stretch=1)
+
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setMinimumHeight(36)
+        self._cancel_btn.setStyleSheet(
+            "QPushButton { background: #7f1d1d; color: white; border-radius: 4px; }"
+            "QPushButton:hover { background: #991b1b; }"
+            "QPushButton:disabled { background: #475569; color: #94a3b8; }"
+        )
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        self._cancel_btn.hide()
+        btn_row.addWidget(self._cancel_btn)
+        action_layout.addLayout(btn_row)
+
+        # Prominent offset display — shown after analysis completes
+        self._offset_label = QLabel()
+        self._offset_label.setAlignment(Qt.AlignCenter)
+        self._offset_label.setStyleSheet(
+            "QLabel { font-size: 13px; font-weight: bold; color: #22c55e; padding: 4px; }"
+        )
+        self._offset_label.hide()
+        action_layout.addWidget(self._offset_label)
 
         self._mux_progress_bar = QProgressBar()
         self._mux_progress_bar.setRange(0, 100)
@@ -299,10 +317,29 @@ class MainWindow(QWidget):
 
         root.addWidget(action_box)
 
+    # ── Settings persistence ──────────────────────────────────────────────────
+
+    def _restore_settings(self) -> None:
+        self._ffmpeg_edit.setText(self._settings.value("ffmpeg_path", "ffmpeg"))
+        self._mkvmerge_edit.setText(self._settings.value("mkvmerge_path", "mkvmerge"))
+        self._sample_start.setValue(int(self._settings.value("sample_start", 120)))
+        self._sample_duration.setValue(int(self._settings.value("sample_duration", 300)))
+        self._sample_rate.setValue(int(self._settings.value("sample_rate", 8000)))
+
+    def closeEvent(self, event) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.wait(3000)
+        self._settings.setValue("ffmpeg_path", self._ffmpeg_edit.text())
+        self._settings.setValue("mkvmerge_path", self._mkvmerge_edit.text())
+        self._settings.setValue("sample_start", self._sample_start.value())
+        self._settings.setValue("sample_duration", self._sample_duration.value())
+        self._settings.setValue("sample_rate", self._sample_rate.value())
+        super().closeEvent(event)
+
     # ── Tool startup check ────────────────────────────────────────────────────
 
     def _check_tools(self) -> None:
-        # Clear previous rows
         while self._banner_layout.count():
             item = self._banner_layout.takeAt(0)
             if item.widget():
@@ -363,7 +400,6 @@ class MainWindow(QWidget):
             self._ffmpeg_edit.setText(result)
             self._check_tools()
         else:
-            # Re-use banner to show the error
             while self._banner_layout.count():
                 item = self._banner_layout.takeAt(0)
                 if item.widget():
@@ -403,14 +439,12 @@ class MainWindow(QWidget):
         target = self._target_edit.text().strip()
 
         if source and os.path.isfile(source):
-            # Only reload tracks when the source path itself changes
             if source != getattr(self, "_loaded_source", None):
                 self._load_tracks(source)
         else:
             self._clear_tracks()
             self._loaded_source = None
 
-        # Auto-populate output path when target is set
         if target and os.path.isfile(target) and not self._output_edit.text().strip():
             base, _ = os.path.splitext(target)
             self._output_edit.setText(base + "_with_commentary.mkv")
@@ -421,7 +455,14 @@ class MainWindow(QWidget):
             tracks = identify_tracks(source_path, mkvmerge)
         except Exception as exc:
             self._clear_tracks()
-            self._banner_label.setText(f"⚠  Could not identify tracks: {exc}")
+            while self._banner_layout.count():
+                item = self._banner_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            lbl = QLabel(f"⚠  Could not identify tracks: {exc}")
+            lbl.setStyleSheet("color: #fed7aa;")
+            lbl.setWordWrap(True)
+            self._banner_layout.addWidget(lbl)
             self._banner.show()
             return
 
@@ -430,7 +471,6 @@ class MainWindow(QWidget):
         self._populate_track_table(tracks)
 
     def _populate_track_table(self, tracks: list[AudioTrack]) -> None:
-        # Clear existing radio buttons from group
         for btn in self._radio_group.buttons():
             self._radio_group.removeButton(btn)
 
@@ -508,6 +548,7 @@ class MainWindow(QWidget):
                 self._log_panel.append_message(f"✗ {e}", "error")
             return
 
+        ffmpeg_path = self._ffmpeg_edit.text().strip() or "ffmpeg"
         params = WorkerParams(
             source_path=source,
             target_path=target,
@@ -516,8 +557,8 @@ class MainWindow(QWidget):
             sample_start=self._sample_start.value(),
             sample_duration=self._sample_duration.value(),
             sample_rate=self._sample_rate.value(),
-            ffmpeg_path=self._ffmpeg_edit.text().strip() or "ffmpeg",
-            ffprobe_path="ffprobe",
+            ffmpeg_path=ffmpeg_path,
+            ffprobe_path=ffmpeg_path.replace("ffmpeg", "ffprobe"),
             mkvmerge_path=self._mkvmerge_edit.text().strip() or "mkvmerge",
         )
 
@@ -526,14 +567,27 @@ class MainWindow(QWidget):
         self._open_folder_btn.hide()
         self._mux_progress_bar.setValue(0)
         self._mux_progress_bar.hide()
+        self._offset_label.hide()
+        self._offset_label.setText("")
         self._run_btn.setEnabled(False)
         self._run_btn.setText("Processing…")
+        self._cancel_btn.setEnabled(True)
+        self._cancel_btn.setText("Cancel")
+        self._cancel_btn.show()
 
         self._worker = PipelineWorker(params, parent=self)
         self._worker.log.connect(self._on_log)
         self._worker.mux_progress.connect(self._on_mux_progress)
+        self._worker.offset_detected.connect(self._on_offset_detected)
+        self._worker.large_offset_query.connect(self._on_large_offset_query)
         self._worker.finished.connect(self._on_finished)
         self._worker.start()
+
+    def _on_cancel(self) -> None:
+        if self._worker:
+            self._worker.cancel()
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.setText("Cancelling…")
 
     def _on_log(self, msg: str, level: str) -> None:
         self._log_panel.append_message(msg, level)
@@ -543,9 +597,31 @@ class MainWindow(QWidget):
             self._mux_progress_bar.show()
         self._mux_progress_bar.setValue(pct)
 
+    def _on_offset_detected(self, offset_ms: int) -> None:
+        sign = "+" if offset_ms >= 0 else ""
+        self._offset_label.setText(f"Detected offset: {sign}{offset_ms} ms")
+        self._offset_label.show()
+
+    def _on_large_offset_query(self, offset_ms: int) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Large offset detected",
+            f"The detected offset is {offset_ms:+d} ms ({abs(offset_ms) // 1000}s).\n\n"
+            "This may indicate the wrong files were selected or an unusual edition "
+            "difference. Proceed with muxing anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        ok = reply == QMessageBox.StandardButton.Yes
+        if self._worker:
+            self._worker.set_large_offset_response(ok)
+
     def _on_finished(self, success: bool, info: str) -> None:
         self._run_btn.setEnabled(True)
         self._run_btn.setText("Analyze && Mux")
+        self._cancel_btn.hide()
+        self._cancel_btn.setEnabled(True)
+        self._cancel_btn.setText("Cancel")
         self._mux_progress_bar.hide()
         self._mux_progress_bar.setValue(0)
         if success:

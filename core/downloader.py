@@ -14,7 +14,17 @@ MKVTOOLNIX_URL = "https://mkvtoolnix.download/downloads.html#windows"
 
 def get_tools_dir() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent / "tools"
+        candidate = Path(sys.executable).parent / "tools"
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / "._write_probe"
+            probe.touch()
+            probe.unlink()
+            return candidate
+        except (PermissionError, OSError):
+            # exe is in a restricted location (e.g. Program Files); use user-writable fallback
+            appdata = os.environ.get("LOCALAPPDATA") or str(Path.home())
+            return Path(appdata) / "mkvsyncdub" / "tools"
     return Path(__file__).parent.parent / "tools"
 
 

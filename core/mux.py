@@ -3,7 +3,10 @@
 import re
 import subprocess
 import sys
+import threading
 from typing import Callable, List, Optional
+
+from .detect_offset import CancellationError
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
@@ -66,6 +69,7 @@ def run_mux(
     dry_run: bool = False,
     progress: Optional[Callable[[str], None]] = None,
     progress_pct: Optional[Callable[[int], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> None:
     def log(msg: str) -> None:
         if progress:
@@ -102,6 +106,13 @@ def run_mux(
         chunk = proc.stdout.read(256)
         if not chunk:
             break
+        if cancel_event and cancel_event.is_set():
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise CancellationError()
         buf += chunk
         parts = re.split(r"[\r\n]+", buf)
         for line in parts[:-1]:
@@ -117,7 +128,9 @@ def run_mux(
         raise RuntimeError(
             f"mkvmerge failed (exit {proc.returncode}):\n{stderr_out}"
         )
-    if proc.returncode == 1 and stderr_out:
-        log(f"⚠ mkvmerge: {stderr_out}")
+    if proc.returncode == 1:
+        if stderr_out:
+            log(f"⚠ mkvmerge warnings:\n{stderr_out}")
+        log("⚠ Muxing completed with warnings — verify the output in VLC or MKVToolNix before discarding originals.")
 
     log(f"✓ Done! Output: {output_path}")
