@@ -72,21 +72,27 @@ def extract_audio_segment(
             "Install ffmpeg: https://ffmpeg.org/download.html"
         )
 
+    # Drain stderr in a background thread to prevent pipe-buffer deadlock
+    # (ffmpeg is verbose; the buffer fills and proc.wait() never returns).
+    stderr_holder: list[str] = []
+
+    def _drain() -> None:
+        stderr_holder.append(proc.communicate()[1])
+
+    drain_thread = threading.Thread(target=_drain, daemon=True)
+    drain_thread.start()
+
     while True:
-        try:
-            proc.wait(timeout=0.25)
+        drain_thread.join(timeout=0.25)
+        if not drain_thread.is_alive():
             break
-        except subprocess.TimeoutExpired:
-            if cancel_event and cancel_event.is_set():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                raise CancellationError()
+        if cancel_event and cancel_event.is_set():
+            proc.terminate()
+            drain_thread.join(timeout=5)
+            raise CancellationError()
 
     if proc.returncode != 0:
-        stderr_text = proc.stderr.read()
+        stderr_text = stderr_holder[0] if stderr_holder else ""
         raise RuntimeError(f"ffmpeg audio extraction failed:\n{stderr_text[-2000:]}")
 
 
