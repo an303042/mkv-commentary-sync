@@ -55,6 +55,18 @@ class ToolPathTests(unittest.TestCase):
                 self.assertTrue(check_tool(tmp, "mkvmerge"))
                 self.assertEqual(run.call_args.args[0][0], str(tool))
 
+    def test_check_tool_uses_single_dash_version_for_ffmpeg(self) -> None:
+        with patch("core.track_utils.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertTrue(check_tool("ffmpeg", "ffmpeg"))
+            self.assertEqual(run.call_args.args[0], ["ffmpeg", "-version"])
+
+    def test_check_tool_uses_double_dash_version_for_mkvmerge(self) -> None:
+        with patch("core.track_utils.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertTrue(check_tool("mkvmerge", "mkvmerge"))
+            self.assertEqual(run.call_args.args[0], ["mkvmerge", "--version"])
+
 
 if __name__ == "__main__":
     unittest.main()
