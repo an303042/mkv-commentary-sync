@@ -4,7 +4,7 @@ import re
 import subprocess
 import sys
 import threading
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
 
 from .detect_offset import CancellationError
 
@@ -42,27 +42,33 @@ def _dispatch_mkvmerge_line(
 def build_mkvmerge_command(
     target_path: str,
     source_path: str,
-    track_id: int,
+    track_ids: Sequence[int],
     offset_ms: int,
     output_path: str,
     mkvmerge_path: str = "mkvmerge",
+    drift_factor: float = 1.0,
+    source_duration_ms: int = 0,
 ) -> List[str]:
-    return [
-        mkvmerge_path,
-        "-o", output_path,
-        target_path,
-        "--sync", f"{track_id}:{offset_ms}",
-        "--audio-tracks", str(track_id),
+    cmd = [mkvmerge_path, "-o", output_path, target_path]
+    for tid in track_ids:
+        if drift_factor != 1.0 and source_duration_ms > 0:
+            o = round(source_duration_ms * drift_factor)
+            cmd += ["--sync", f"{tid}:{offset_ms},{o}/{source_duration_ms}"]
+        else:
+            cmd += ["--sync", f"{tid}:{offset_ms}"]
+    cmd += [
+        "--audio-tracks", ",".join(str(tid) for tid in track_ids),
         "--no-video",
         "--no-subtitles",
         source_path,
     ]
+    return cmd
 
 
 def run_mux(
     target_path: str,
     source_path: str,
-    track_id: int,
+    track_ids: Sequence[int],
     offset_ms: int,
     output_path: str,
     mkvmerge_path: str = "mkvmerge",
@@ -70,13 +76,17 @@ def run_mux(
     progress: Optional[Callable[[str], None]] = None,
     progress_pct: Optional[Callable[[int], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    drift_factor: float = 1.0,
+    source_duration_ms: int = 0,
 ) -> None:
     def log(msg: str) -> None:
         if progress:
             progress(msg)
 
     cmd = build_mkvmerge_command(
-        target_path, source_path, track_id, offset_ms, output_path, mkvmerge_path
+        target_path, source_path, track_ids, offset_ms, output_path, mkvmerge_path,
+        drift_factor=drift_factor,
+        source_duration_ms=source_duration_ms,
     )
 
     if dry_run:

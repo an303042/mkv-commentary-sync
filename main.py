@@ -103,7 +103,7 @@ def _run_cli(args: argparse.Namespace) -> int:
             console.print(msg)
 
     try:
-        offset_ms = detect_offset(
+        result = detect_offset(
             source_path=args.source,
             target_path=args.target,
             sample_start=float(args.sample_start),
@@ -119,9 +119,9 @@ def _run_cli(args: argparse.Namespace) -> int:
         return 1
 
     # ── Large offset warning ──────────────────────────────────────────────────
-    if abs(offset_ms) > 30_000:
+    if abs(result.offset_ms) > 30_000:
         console.print(
-            f"[yellow]⚠ Large offset detected ({offset_ms:+d} ms). "
+            f"[yellow]⚠ Large offset detected ({result.offset_ms:+d} ms). "
             "Continue? [y/N] [/yellow]",
             end="",
         )
@@ -138,12 +138,14 @@ def _run_cli(args: argparse.Namespace) -> int:
         run_mux(
             target_path=args.target,
             source_path=args.source,
-            track_id=track_id,
-            offset_ms=offset_ms,
+            track_ids=[track_id],
+            offset_ms=result.offset_ms,
             output_path=output,
             mkvmerge_path=args.mkvmerge_path,
             dry_run=args.dry_run,
             progress=progress,
+            drift_factor=result.drift_factor,
+            source_duration_ms=result.source_duration_ms,
         )
     except RuntimeError as exc:
         console.print(f"[red]✗ {exc}[/red]")

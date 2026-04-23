@@ -3,12 +3,15 @@
 import os
 import subprocess
 import sys
+from typing import List, Optional
 
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -139,11 +142,14 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MKV Commentary Sync")
-        self.setMinimumWidth(720)
+        self.setMinimumWidth(800)
 
         self._worker: QThread | None = None
-        self._tracks: list[AudioTrack] = []
-        self._radio_group = QButtonGroup(self)
+        self._src_tracks: List[AudioTrack] = []
+        self._tgt_tracks: List[AudioTrack] = []
+        self._src_ref_group = QButtonGroup(self)
+        self._tgt_ref_group = QButtonGroup(self)
+        self._mux_checkboxes: List[QCheckBox] = []
         self._settings = QSettings("mkvsyncdub", "mkvsyncdub")
 
         self._build_ui()
@@ -157,7 +163,7 @@ class MainWindow(QWidget):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # Warning banner — populated dynamically by _check_tools / _load_tracks
+        # Warning banner — populated dynamically
         self._banner = QFrame()
         self._banner.setStyleSheet("QFrame { background: #7c2d12; border-radius: 4px; }")
         self._banner_layout = QVBoxLayout(self._banner)
@@ -190,24 +196,36 @@ class MainWindow(QWidget):
 
         root.addWidget(files_box)
 
-        # ── Section 2: Track Selection ────────────────────────────────────────
-        tracks_box = QGroupBox("Track Selection")
-        tracks_layout = QVBoxLayout(tracks_box)
+        # ── Section 2: Reference Tracks ───────────────────────────────────────
+        ref_box = QGroupBox("Reference Tracks (used for sync detection)")
+        ref_layout = QHBoxLayout(ref_box)
+        ref_layout.setSpacing(8)
 
-        self._track_table = QTableWidget(0, 6)
-        self._track_table.setHorizontalHeaderLabels(
-            ["Select", "Track ID", "Language", "Codec", "Channels", "Name"]
-        )
-        self._track_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
-        self._track_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self._track_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self._track_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._track_table.setEnabled(False)
-        tracks_layout.addWidget(self._track_table)
+        src_ref_sub = QGroupBox("Source")
+        src_ref_sub_layout = QVBoxLayout(src_ref_sub)
+        src_ref_sub_layout.setContentsMargins(6, 6, 6, 6)
+        self._src_ref_table = self._make_track_table()
+        src_ref_sub_layout.addWidget(self._src_ref_table)
+        ref_layout.addWidget(src_ref_sub)
 
-        root.addWidget(tracks_box)
+        tgt_ref_sub = QGroupBox("Target")
+        tgt_ref_sub_layout = QVBoxLayout(tgt_ref_sub)
+        tgt_ref_sub_layout.setContentsMargins(6, 6, 6, 6)
+        self._tgt_ref_table = self._make_track_table()
+        tgt_ref_sub_layout.addWidget(self._tgt_ref_table)
+        ref_layout.addWidget(tgt_ref_sub)
 
-        # ── Section 3: Output & Options ───────────────────────────────────────
+        root.addWidget(ref_box)
+
+        # ── Section 3: Tracks to Mux ──────────────────────────────────────────
+        mux_box = QGroupBox("Tracks to Mux (from source)")
+        mux_layout = QVBoxLayout(mux_box)
+        mux_layout.setContentsMargins(6, 6, 6, 6)
+        self._mux_table = self._make_track_table(select_header="Mux")
+        mux_layout.addWidget(self._mux_table)
+        root.addWidget(mux_box)
+
+        # ── Section 4: Output & Options ───────────────────────────────────────
         output_box = QGroupBox("Output & Options")
         output_layout = QVBoxLayout(output_box)
 
@@ -246,10 +264,22 @@ class MainWindow(QWidget):
         self._ffmpeg_edit = QLineEdit("ffmpeg")
         self._mkvmerge_edit = QLineEdit("mkvmerge")
 
+        self._min_ncc = QDoubleSpinBox()
+        self._min_ncc.setRange(0.001, 1.0)
+        self._min_ncc.setSingleStep(0.005)
+        self._min_ncc.setDecimals(3)
+        self._min_ncc.setValue(0.02)
+        self._min_ncc.setToolTip(
+            "Minimum NCC score to accept a sample point.\n"
+            "Lower this (e.g. 0.01) if all points are rejected — stereo vs surround\n"
+            "or different audio masters can suppress NCC even for matching content."
+        )
+
         for row, (label, widget) in enumerate([
             ("Sample start:", self._sample_start),
             ("Sample duration:", self._sample_duration),
             ("Sample rate:", self._sample_rate),
+            ("Min. NCC:", self._min_ncc),
             ("ffmpeg path:", self._ffmpeg_edit),
             ("mkvmerge path:", self._mkvmerge_edit),
         ]):
@@ -260,12 +290,11 @@ class MainWindow(QWidget):
         output_layout.addWidget(adv)
         root.addWidget(output_box)
 
-        # ── Section 4: Action & Progress ─────────────────────────────────────
+        # ── Section 5: Action & Progress ─────────────────────────────────────
         action_box = QGroupBox()
         action_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         action_layout = QVBoxLayout(action_box)
 
-        # Button row: [Analyze & Mux (stretches)] [Cancel]
         btn_row = QHBoxLayout()
         self._run_btn = QPushButton("Analyze && Mux")
         self._run_btn.setMinimumHeight(36)
@@ -289,7 +318,6 @@ class MainWindow(QWidget):
         btn_row.addWidget(self._cancel_btn)
         action_layout.addLayout(btn_row)
 
-        # Prominent offset display — shown after analysis completes
         self._offset_label = QLabel()
         self._offset_label.setAlignment(Qt.AlignCenter)
         self._offset_label.setStyleSheet(
@@ -317,6 +345,16 @@ class MainWindow(QWidget):
 
         root.addWidget(action_box)
 
+    def _make_track_table(self, select_header: str = "") -> QTableWidget:
+        t = QTableWidget(0, 6)
+        t.setHorizontalHeaderLabels([select_header, "ID", "Language", "Codec", "Ch", "Name"])
+        t.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        t.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        t.setSelectionMode(QAbstractItemView.NoSelection)
+        t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        t.setEnabled(False)
+        return t
+
     # ── Settings persistence ──────────────────────────────────────────────────
 
     def _restore_settings(self) -> None:
@@ -325,6 +363,7 @@ class MainWindow(QWidget):
         self._sample_start.setValue(int(self._settings.value("sample_start", 120)))
         self._sample_duration.setValue(int(self._settings.value("sample_duration", 300)))
         self._sample_rate.setValue(int(self._settings.value("sample_rate", 8000)))
+        self._min_ncc.setValue(float(self._settings.value("min_ncc", 0.02)))
 
     def closeEvent(self, event) -> None:
         if self._worker and self._worker.isRunning():
@@ -335,6 +374,7 @@ class MainWindow(QWidget):
         self._settings.setValue("sample_start", self._sample_start.value())
         self._settings.setValue("sample_duration", self._sample_duration.value())
         self._settings.setValue("sample_rate", self._sample_rate.value())
+        self._settings.setValue("min_ncc", self._min_ncc.value())
         super().closeEvent(event)
 
     # ── Tool startup check ────────────────────────────────────────────────────
@@ -440,87 +480,147 @@ class MainWindow(QWidget):
 
         if source and os.path.isfile(source):
             if source != getattr(self, "_loaded_source", None):
-                self._load_tracks(source)
+                self._load_source_tracks(source)
         else:
-            self._clear_tracks()
-            self._loaded_source = None
+            self._clear_source_tracks()
 
-        if target and os.path.isfile(target) and not self._output_edit.text().strip():
-            base, _ = os.path.splitext(target)
-            self._output_edit.setText(base + "_with_commentary.mkv")
+        if target and os.path.isfile(target):
+            if target != getattr(self, "_loaded_target", None):
+                self._load_target_tracks(target)
+            if not self._output_edit.text().strip():
+                base, _ = os.path.splitext(target)
+                self._output_edit.setText(base + "_with_commentary.mkv")
+        else:
+            self._clear_target_tracks()
 
-    def _load_tracks(self, source_path: str) -> None:
+    def _load_source_tracks(self, source_path: str) -> None:
         mkvmerge = self._mkvmerge_edit.text().strip() or "mkvmerge"
         try:
             tracks = identify_tracks(source_path, mkvmerge)
         except Exception as exc:
-            self._clear_tracks()
-            while self._banner_layout.count():
-                item = self._banner_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-            lbl = QLabel(f"⚠  Could not identify tracks: {exc}")
-            lbl.setStyleSheet("color: #fed7aa;")
-            lbl.setWordWrap(True)
-            self._banner_layout.addWidget(lbl)
-            self._banner.show()
+            self._clear_source_tracks()
+            self._show_banner_error(f"Could not identify source tracks: {exc}")
             return
-
         self._loaded_source = source_path
-        self._tracks = tracks
-        self._populate_track_table(tracks)
+        self._src_tracks = tracks
+        self._populate_ref_table(self._src_ref_table, tracks, self._src_ref_group)
+        self._populate_mux_table(tracks)
 
-    def _populate_track_table(self, tracks: list[AudioTrack]) -> None:
-        for btn in self._radio_group.buttons():
-            self._radio_group.removeButton(btn)
+    def _load_target_tracks(self, target_path: str) -> None:
+        mkvmerge = self._mkvmerge_edit.text().strip() or "mkvmerge"
+        try:
+            tracks = identify_tracks(target_path, mkvmerge)
+        except Exception as exc:
+            self._clear_target_tracks()
+            self._show_banner_error(f"Could not identify target tracks: {exc}")
+            return
+        self._loaded_target = target_path
+        self._tgt_tracks = tracks
+        self._populate_ref_table(self._tgt_ref_table, tracks, self._tgt_ref_group)
 
-        self._track_table.setRowCount(len(tracks))
-        self._track_table.setEnabled(bool(tracks))
+    def _clear_source_tracks(self) -> None:
+        for btn in self._src_ref_group.buttons():
+            self._src_ref_group.removeButton(btn)
+        self._src_ref_table.setRowCount(0)
+        self._src_ref_table.setEnabled(False)
+        self._mux_table.setRowCount(0)
+        self._mux_table.setEnabled(False)
+        self._src_tracks = []
+        self._mux_checkboxes = []
+        self._loaded_source = None
 
+    def _clear_target_tracks(self) -> None:
+        for btn in self._tgt_ref_group.buttons():
+            self._tgt_ref_group.removeButton(btn)
+        self._tgt_ref_table.setRowCount(0)
+        self._tgt_ref_table.setEnabled(False)
+        self._tgt_tracks = []
+        self._loaded_target = None
+
+    def _populate_ref_table(
+        self,
+        table: QTableWidget,
+        tracks: List[AudioTrack],
+        group: QButtonGroup,
+    ) -> None:
+        for btn in group.buttons():
+            group.removeButton(btn)
+        table.setRowCount(len(tracks))
+        table.setEnabled(bool(tracks))
         for row, track in enumerate(tracks):
             radio = QRadioButton()
             if row == 0:
                 radio.setChecked(True)
-            self._radio_group.addButton(radio, row)
-
-            cell_widget = QWidget()
-            cell_layout = QHBoxLayout(cell_widget)
-            cell_layout.addWidget(radio)
-            cell_layout.setAlignment(Qt.AlignCenter)
-            cell_layout.setContentsMargins(0, 0, 0, 0)
-            self._track_table.setCellWidget(row, 0, cell_widget)
-
-            for col, value in enumerate(
-                [
-                    str(track.track_id),
-                    track.language,
-                    track.codec,
-                    str(track.channels) if track.channels else "",
-                    track.name,
-                ],
-                start=1,
+            group.addButton(radio, row)
+            cell = QWidget()
+            cl = QHBoxLayout(cell)
+            cl.addWidget(radio)
+            cl.setAlignment(Qt.AlignCenter)
+            cl.setContentsMargins(0, 0, 0, 0)
+            table.setCellWidget(row, 0, cell)
+            for col, val in enumerate(
+                [str(track.track_id), track.language, track.codec,
+                 str(track.channels) if track.channels else "", track.name], 1
             ):
-                item = QTableWidgetItem(value)
+                item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignCenter)
-                self._track_table.setItem(row, col, item)
+                table.setItem(row, col, item)
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
 
-        self._track_table.resizeColumnsToContents()
-        self._track_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+    def _populate_mux_table(self, tracks: List[AudioTrack]) -> None:
+        self._mux_checkboxes = []
+        self._mux_table.setRowCount(len(tracks))
+        self._mux_table.setEnabled(bool(tracks))
+        for row, track in enumerate(tracks):
+            cb = QCheckBox()
+            cb.setChecked(row == 0)
+            self._mux_checkboxes.append(cb)
+            cell = QWidget()
+            cl = QHBoxLayout(cell)
+            cl.addWidget(cb)
+            cl.setAlignment(Qt.AlignCenter)
+            cl.setContentsMargins(0, 0, 0, 0)
+            self._mux_table.setCellWidget(row, 0, cell)
+            for col, val in enumerate(
+                [str(track.track_id), track.language, track.codec,
+                 str(track.channels) if track.channels else "", track.name], 1
+            ):
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(Qt.AlignCenter)
+                self._mux_table.setItem(row, col, item)
+        self._mux_table.resizeColumnsToContents()
+        self._mux_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
 
-    def _clear_tracks(self) -> None:
-        for btn in self._radio_group.buttons():
-            self._radio_group.removeButton(btn)
-        self._track_table.setRowCount(0)
-        self._track_table.setEnabled(False)
-        self._tracks = []
+    def _show_banner_error(self, msg: str) -> None:
+        while self._banner_layout.count():
+            item = self._banner_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        lbl = QLabel(f"⚠  {msg}")
+        lbl.setStyleSheet("color: #fed7aa;")
+        lbl.setWordWrap(True)
+        self._banner_layout.addWidget(lbl)
+        self._banner.show()
+
+    # ── Selection helpers ─────────────────────────────────────────────────────
+
+    def _src_ref_audio_index(self) -> int:
+        idx = self._src_ref_group.checkedId()
+        return max(0, idx)
+
+    def _tgt_ref_audio_index(self) -> int:
+        idx = self._tgt_ref_group.checkedId()
+        return max(0, idx)
+
+    def _selected_mux_track_ids(self) -> List[int]:
+        return [
+            self._src_tracks[i].track_id
+            for i, cb in enumerate(self._mux_checkboxes)
+            if cb.isChecked()
+        ]
 
     # ── Run pipeline ──────────────────────────────────────────────────────────
-
-    def _selected_track_id(self) -> int | None:
-        checked_id = self._radio_group.checkedId()
-        if checked_id < 0 or checked_id >= len(self._tracks):
-            return None
-        return self._tracks[checked_id].track_id
 
     def _on_run(self) -> None:
         source = self._source_edit.text().strip()
@@ -534,12 +634,14 @@ class MainWindow(QWidget):
             errors.append("Target file not found.")
         if not output:
             errors.append("Output path is required.")
-        if not self._tracks:
+        if not self._src_tracks:
             errors.append("No audio tracks loaded from source file.")
+        if not self._tgt_tracks:
+            errors.append("No audio tracks loaded from target file.")
 
-        track_id = self._selected_track_id()
-        if track_id is None:
-            errors.append("No track selected.")
+        mux_ids = self._selected_mux_track_ids()
+        if not mux_ids:
+            errors.append("No tracks selected to mux.")
 
         if errors:
             self._log_panel.show()
@@ -552,7 +654,7 @@ class MainWindow(QWidget):
         params = WorkerParams(
             source_path=source,
             target_path=target,
-            track_id=track_id,
+            track_ids=mux_ids,
             output_path=output,
             sample_start=self._sample_start.value(),
             sample_duration=self._sample_duration.value(),
@@ -560,6 +662,9 @@ class MainWindow(QWidget):
             ffmpeg_path=ffmpeg_path,
             ffprobe_path=ffmpeg_path.replace("ffmpeg", "ffprobe"),
             mkvmerge_path=self._mkvmerge_edit.text().strip() or "mkvmerge",
+            src_ref_audio_index=self._src_ref_audio_index(),
+            tgt_ref_audio_index=self._tgt_ref_audio_index(),
+            min_ncc=self._min_ncc.value(),
         )
 
         self._log_panel.show()

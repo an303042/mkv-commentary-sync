@@ -1,8 +1,8 @@
 # MKV Commentary Sync
 
-Adds a commentary track from one MKV edition of a film to another edition that lacks it, with the timing offset automatically detected and corrected.
+Adds commentary or dub tracks from one MKV edition of a film to another edition, with timing offset and simple linear drift automatically detected and corrected.
 
-Different releases of the same film often have slightly different runtimes — longer studio logos, alternate intros, minor editorial changes. Naively dropping a commentary track into the wrong edition causes it to drift out of sync. This tool measures the exact offset between the two files and muxes the track at the right delay. No re-encoding at any stage.
+Different releases of the same film often have slightly different runtimes — longer studio logos, alternate intros, frame-rate speed differences, or minor editorial changes. Naively dropping an audio track into the wrong edition can start in sync but drift out over time. This tool compares reference audio from both files, measures the offset, applies timestamp drift correction when the mismatch is linear, and muxes the selected source track(s) into the target. No audio or video is re-encoded.
 
 ---
 
@@ -48,6 +48,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
+In the GUI:
+
+1. Choose the **source** file that contains the audio track(s) you want to copy.
+2. Choose the **target** file that should receive those track(s).
+3. Pick one source and one target **Reference Track** for sync detection. Use matching-language tracks when possible.
+4. Check one or more **Tracks to Mux** from the source file.
+5. Click **Analyze & Mux**.
+
 **CLI:**
 ```
 python main.py --source <source.mkv> --target <target.mkv> [options]
@@ -69,7 +77,7 @@ Output: `dist/mkvsyncdub.exe`
 
 ## CLI options
 
-If `--track-id` is omitted, the tool lists available audio tracks and prompts you to choose.
+If `--track-id` is omitted, the CLI lists available source audio tracks and prompts you to choose. The CLI muxes one selected source track per run and uses the first audio track in each file as the sync reference. Use the GUI when you need to choose different reference tracks or mux multiple tracks in one pass.
 
 | Option | Default | Description |
 |---|---|---|
@@ -89,13 +97,15 @@ If `--track-id` is omitted, the tool lists available audio tracks and prompts yo
 
 ## How it works
 
-**Step 1 — Frame rate check.** ffprobe reads the video frame rate from both files. A mismatch (> 0.01 fps) usually means a PAL/NTSC speed difference; the tool aborts because no single fixed offset can correct that.
+**Step 1 — Frame rate check.** ffprobe reads the video frame rate from both files. Matching frame rates usually mean a fixed delay is enough. A mismatch (> 0.01 fps), such as 24.000 vs. 23.976, is treated as a drift hint instead of an automatic failure.
 
-**Step 2 — 3-point cross-correlation.** The tool extracts a short mono audio segment from both files at three evenly-spaced points (beginning, 40%, and 75% through the shorter file). For each point it runs a normalized cross-correlation to find the lag at which the two waveforms best align, giving an offset in milliseconds.
+**Step 2 — Reference-track correlation.** The tool extracts short mono audio segments from the selected reference tracks. In the GUI, these can be any source/target audio tracks; in the CLI, they default to the first audio track in each file. Each sample uses normalized cross-correlation to find the lag where both waveforms best align.
 
-**Step 3 — Consistency check.** If all three offsets agree within ±50 ms, their median is used as the final offset. If they diverge, the editions likely differ mid-film (an extended scene, alternate cut, etc.) and a single fixed offset won't work.
+**Step 3 — Multi-point drift detection.** The tool samples up to five points across the shorter file. If the offsets are effectively constant, their median becomes the final delay. If they follow a line, the tool fits `offset(t) = slope * t + base` and converts the slope into an `mkvmerge --sync` timestamp ratio. This handles simple uniform speed differences without re-encoding.
 
-**Step 4 — Mux.** mkvmerge stream-copies all tracks from the target, then appends the selected track from the source with `--sync <id>:<offset_ms>` to shift its timestamps. No audio or video is decoded or re-encoded.
+**Step 4 — Consistency check.** If offsets do not fit either a constant delay or a linear drift model, the editions likely differ mid-film (extended scene, alternate cut, missing logo, etc.). In that case, a single delay or stretch cannot reliably fix the whole file.
+
+**Step 5 — Mux.** mkvmerge stream-copies all tracks from the target, then appends the selected source track(s) with `--sync <id>:<offset_ms>` or `--sync <id>:<offset_ms>,<ratio>` when drift correction is needed. No audio or video is decoded or re-encoded.
 
 ### Sign convention
 
@@ -106,15 +116,17 @@ If `--track-id` is omitted, the tool lists available audio tracks and prompts yo
 
 ### Notes on correlation confidence
 
-The normalized cross-correlation (NCC) value reflects how similar the two audio waveforms are at each sample point. Different Blu-ray masterings of the same film often have different loudness, EQ, or dynamic range processing, which can push NCC well below 0.5 while still producing the correct lag. The tool accepts any sample with NCC > 0.05 and relies on the 3-point consistency check as the primary quality gate.
+The normalized cross-correlation (NCC) value reflects how similar the two audio waveforms are at each sample point. Different Blu-ray, WEB, stereo, and surround masters can have different loudness, EQ, channel layout, or dynamic range processing, which can push NCC well below 0.5 while still producing the correct lag. The default minimum is `0.02`; points below that are excluded.
 
-If all three points fail (NCC ≤ 0.05), the audio segments are likely silent. Adjust **Sample Start** in Advanced options to land on a section of the film with dialogue.
+If all sample points fail, the audio segments may be silent, the chosen reference tracks may not contain matching content, or the minimum may be too strict for those masters. In the GUI, try choosing a better-matching source/target reference track pair, adjusting **Sample Start** / **Sample Duration**, or lowering **Min. NCC** in Advanced.
 
 ---
 
-## Adding a second commentary track
+## Adding multiple audio tracks
 
-Run the tool twice, using the first output as the target for the second run:
+The GUI can mux multiple selected source audio tracks in one run. All selected tracks receive the same detected delay and drift correction, so this works best when those source tracks are already internally synchronized with each other.
+
+The CLI muxes one source audio track per run. To add more than one track from the CLI, run it repeatedly and use the previous output as the next target:
 
 ```bash
 python main.py --source src.mkv --target target.mkv --track-id 2 --output pass1.mkv
@@ -136,6 +148,8 @@ mkv-commentary-sync/
 ├── gui/
 │   ├── main_window.py      # PySide6 main window
 │   └── worker.py           # QThread pipeline worker
+├── tests/
+│   └── test_drift_math.py  # Regression tests for drift correction math
 ├── .github/workflows/
 │   └── release.yml         # Builds Windows/macOS/Linux binaries on tag push
 ├── mkvsyncdub.spec         # PyInstaller build spec

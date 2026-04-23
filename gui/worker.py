@@ -1,10 +1,11 @@
 """QThread worker — runs the full pipeline and emits progress signals."""
 
 import threading
+from typing import List
 
 from PySide6.QtCore import QThread, Signal
 
-from core.detect_offset import CancellationError
+from core.detect_offset import CancellationError, SyncResult
 
 
 class WorkerParams:
@@ -12,7 +13,7 @@ class WorkerParams:
         self,
         source_path: str,
         target_path: str,
-        track_id: int,
+        track_ids: List[int],
         output_path: str,
         sample_start: int = 120,
         sample_duration: int = 300,
@@ -21,10 +22,13 @@ class WorkerParams:
         ffprobe_path: str = "ffprobe",
         mkvmerge_path: str = "mkvmerge",
         dry_run: bool = False,
+        src_ref_audio_index: int = 0,
+        tgt_ref_audio_index: int = 0,
+        min_ncc: float = 0.02,
     ):
         self.source_path = source_path
         self.target_path = target_path
-        self.track_id = track_id
+        self.track_ids = track_ids
         self.output_path = output_path
         self.sample_start = sample_start
         self.sample_duration = sample_duration
@@ -33,6 +37,9 @@ class WorkerParams:
         self.ffprobe_path = ffprobe_path
         self.mkvmerge_path = mkvmerge_path
         self.dry_run = dry_run
+        self.src_ref_audio_index = src_ref_audio_index
+        self.tgt_ref_audio_index = tgt_ref_audio_index
+        self.min_ncc = min_ncc
 
 
 class PipelineWorker(QThread):
@@ -80,16 +87,17 @@ class PipelineWorker(QThread):
             from core.mux import run_mux
             from core.track_utils import identify_tracks
 
-            # Validate track exists in source
+            # Validate all requested mux tracks exist in source
             tracks = identify_tracks(p.source_path, p.mkvmerge_path)
-            valid_ids = [t.track_id for t in tracks]
-            if p.track_id not in valid_ids:
+            valid_ids = {t.track_id for t in tracks}
+            invalid = [tid for tid in p.track_ids if tid not in valid_ids]
+            if invalid:
                 raise RuntimeError(
-                    f"Track ID {p.track_id} not found in source file.\n"
-                    f"Valid audio track IDs: {valid_ids}"
+                    f"Track IDs {invalid} not found in source file.\n"
+                    f"Valid audio track IDs: {sorted(valid_ids)}"
                 )
 
-            offset_ms = detect_offset(
+            result: SyncResult = detect_offset(
                 source_path=p.source_path,
                 target_path=p.target_path,
                 sample_start=float(p.sample_start),
@@ -100,33 +108,46 @@ class PipelineWorker(QThread):
                 mkvmerge_path=p.mkvmerge_path,
                 progress=self._log,
                 cancel_event=self._cancel_event,
+                src_ref_audio_index=p.src_ref_audio_index,
+                tgt_ref_audio_index=p.tgt_ref_audio_index,
+                min_ncc=p.min_ncc,
             )
 
-            self.offset_detected.emit(offset_ms)
+            self.offset_detected.emit(result.offset_ms)
 
             # Large offset: pause and ask the user before proceeding to mux
-            if abs(offset_ms) > 30_000:
+            if abs(result.offset_ms) > 30_000:
                 self._proceed_event.clear()
                 self._proceed_ok = True
-                self.large_offset_query.emit(offset_ms)
+                self.large_offset_query.emit(result.offset_ms)
                 self._proceed_event.wait()
                 if not self._proceed_ok or self._cancel_event.is_set():
                     self._log("⚠ Aborted by user.")
                     self.finished.emit(False, "aborted")
                     return
 
-            self._log(f"Muxing track {p.track_id} with offset {offset_ms:+d} ms…")
+            n = len(p.track_ids)
+            track_word = "track" if n == 1 else "tracks"
+            if result.drift_factor != 1.0:
+                self._log(
+                    f"Muxing {n} {track_word} with offset {result.offset_ms:+d} ms "
+                    f"and drift correction (factor {result.drift_factor:.6f})…"
+                )
+            else:
+                self._log(f"Muxing {n} {track_word} with offset {result.offset_ms:+d} ms…")
             run_mux(
                 target_path=p.target_path,
                 source_path=p.source_path,
-                track_id=p.track_id,
-                offset_ms=offset_ms,
+                track_ids=p.track_ids,
+                offset_ms=result.offset_ms,
                 output_path=p.output_path,
                 mkvmerge_path=p.mkvmerge_path,
                 dry_run=p.dry_run,
                 progress=self._log,
                 progress_pct=lambda pct: self.mux_progress.emit(pct),
                 cancel_event=self._cancel_event,
+                drift_factor=result.drift_factor,
+                source_duration_ms=result.source_duration_ms,
             )
 
             # List output tracks
