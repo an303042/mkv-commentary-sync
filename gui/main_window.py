@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.track_utils import AudioTrack, check_tool, identify_tracks
+from core.tool_paths import sibling_tool_path
 from gui.worker import PipelineWorker, WorkerParams
 
 
@@ -263,6 +264,8 @@ class MainWindow(QWidget):
 
         self._ffmpeg_edit = QLineEdit("ffmpeg")
         self._mkvmerge_edit = QLineEdit("mkvmerge")
+        self._ffmpeg_edit.editingFinished.connect(self._check_tools)
+        self._mkvmerge_edit.editingFinished.connect(self._on_mkvmerge_path_changed)
 
         self._min_ncc = QDoubleSpinBox()
         self._min_ncc.setRange(0.001, 1.0)
@@ -660,7 +663,7 @@ class MainWindow(QWidget):
             sample_duration=self._sample_duration.value(),
             sample_rate=self._sample_rate.value(),
             ffmpeg_path=ffmpeg_path,
-            ffprobe_path=ffmpeg_path.replace("ffmpeg", "ffprobe"),
+            ffprobe_path=sibling_tool_path(ffmpeg_path, "ffmpeg", "ffprobe"),
             mkvmerge_path=self._mkvmerge_edit.text().strip() or "mkvmerge",
             src_ref_audio_index=self._src_ref_audio_index(),
             tgt_ref_audio_index=self._tgt_ref_audio_index(),
@@ -687,6 +690,16 @@ class MainWindow(QWidget):
         self._worker.large_offset_query.connect(self._on_large_offset_query)
         self._worker.finished.connect(self._on_finished)
         self._worker.start()
+
+    def _on_mkvmerge_path_changed(self) -> None:
+        self._check_tools()
+        source = self._source_edit.text().strip()
+        target = self._target_edit.text().strip()
+        if source and os.path.isfile(source):
+            self._loaded_source = None
+        if target and os.path.isfile(target):
+            self._loaded_target = None
+        self._on_files_changed()
 
     def _on_cancel(self) -> None:
         if self._worker:

@@ -29,6 +29,7 @@ def _run_cli(args: argparse.Namespace) -> int:
     from core.detect_offset import detect_offset
     from core.mux import run_mux
     from core.track_utils import identify_tracks
+    from core.tool_paths import sibling_tool_path
 
     console = Console()
 
@@ -110,7 +111,7 @@ def _run_cli(args: argparse.Namespace) -> int:
             sample_duration=float(args.sample_duration),
             sample_rate=args.sample_rate,
             ffmpeg_path=args.ffmpeg_path,
-            ffprobe_path=args.ffmpeg_path.replace("ffmpeg", "ffprobe"),
+            ffprobe_path=sibling_tool_path(args.ffmpeg_path, "ffmpeg", "ffprobe"),
             mkvmerge_path=args.mkvmerge_path,
             progress=progress,
         )

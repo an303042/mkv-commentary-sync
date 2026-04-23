@@ -7,6 +7,7 @@ import threading
 from typing import Callable, List, Optional, Sequence
 
 from .detect_offset import CancellationError
+from .tool_paths import resolve_tool_path
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
@@ -49,6 +50,7 @@ def build_mkvmerge_command(
     drift_factor: float = 1.0,
     source_duration_ms: int = 0,
 ) -> List[str]:
+    mkvmerge_path = resolve_tool_path(mkvmerge_path, "mkvmerge")
     cmd = [mkvmerge_path, "-o", output_path, target_path]
     for tid in track_ids:
         if drift_factor != 1.0 and source_duration_ms > 0:
@@ -104,7 +106,7 @@ def run_mux(
             bufsize=0,
             creationflags=_NO_WINDOW,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         raise RuntimeError(
             f"mkvmerge not found at '{mkvmerge_path}'. "
             "Install MKVToolNix: https://mkvtoolnix.download/"

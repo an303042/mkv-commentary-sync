@@ -4,6 +4,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from .tool_paths import resolve_tool_path
+
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
@@ -20,6 +22,7 @@ def identify_tracks(
     mkv_path: str,
     mkvmerge_path: str = "mkvmerge",
 ) -> List[AudioTrack]:
+    mkvmerge_path = resolve_tool_path(mkvmerge_path, "mkvmerge")
     try:
         result = subprocess.run(
             [mkvmerge_path, "--identify", "--identification-format", "json", mkv_path],
@@ -28,7 +31,7 @@ def identify_tracks(
             timeout=30,
             creationflags=_NO_WINDOW,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         raise RuntimeError(
             f"mkvmerge not found at '{mkvmerge_path}'. "
             "Install MKVToolNix: https://mkvtoolnix.download/"
@@ -76,6 +79,7 @@ def _simplify_codec(codec_id: str) -> str:
 
 
 def get_file_duration(mkv_path: str, ffprobe_path: str = "ffprobe") -> float:
+    ffprobe_path = resolve_tool_path(ffprobe_path, "ffprobe")
     try:
         result = subprocess.run(
             [
@@ -90,7 +94,7 @@ def get_file_duration(mkv_path: str, ffprobe_path: str = "ffprobe") -> float:
             timeout=30,
             creationflags=_NO_WINDOW,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         raise RuntimeError(
             f"ffprobe not found at '{ffprobe_path}'. "
             "Install ffmpeg: https://ffmpeg.org/download.html"
@@ -106,6 +110,7 @@ def get_file_duration(mkv_path: str, ffprobe_path: str = "ffprobe") -> float:
 
 
 def get_frame_rate(mkv_path: str, ffprobe_path: str = "ffprobe") -> float:
+    ffprobe_path = resolve_tool_path(ffprobe_path, "ffprobe")
     try:
         result = subprocess.run(
             [
@@ -121,7 +126,7 @@ def get_frame_rate(mkv_path: str, ffprobe_path: str = "ffprobe") -> float:
             timeout=30,
             creationflags=_NO_WINDOW,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         raise RuntimeError(
             f"ffprobe not found at '{ffprobe_path}'. "
             "Install ffmpeg: https://ffmpeg.org/download.html"
@@ -144,13 +149,14 @@ def get_frame_rate(mkv_path: str, ffprobe_path: str = "ffprobe") -> float:
 
 def check_tool(path: str) -> bool:
     """Return True if the binary at `path` is executable."""
+    path = resolve_tool_path(path, path or "")
     try:
-        subprocess.run(
+        result = subprocess.run(
             [path, "--version"],
             capture_output=True,
             timeout=10,
             creationflags=_NO_WINDOW,
         )
-        return True
+        return result.returncode == 0
     except (FileNotFoundError, OSError):
         return False

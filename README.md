@@ -31,7 +31,7 @@ The tool requires two external binaries. **These are not bundled** — they must
 | **ffmpeg** | Audio extraction and frame-rate detection | `winget install Gyan.FFmpeg` | `brew install ffmpeg` | `sudo apt install ffmpeg` |
 | **MKVToolNix** (`mkvmerge`) | Track identification and muxing | `winget install MKVToolNix.MKVToolNix` | `brew install mkvtoolnix` | `sudo apt install mkvtoolnix` |
 
-Both must be on PATH, or their paths set manually in the Advanced panel.
+Both must be on PATH, or their paths set manually in the Advanced panel. The path fields accept either the executable itself (for example `C:\Program Files\MKVToolNix\mkvmerge.exe`) or the install folder that contains it (for example `C:\Program Files\MKVToolNix`).
 
 On Windows, if you're using the standalone `.exe`, the GUI will detect missing tools on launch and offer a **Download ffmpeg** button (automated) and a **Get MKVToolNix** button (opens the download page).
 

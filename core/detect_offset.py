@@ -16,6 +16,8 @@ import numpy as np
 import scipy.io.wavfile
 from scipy.signal import correlate, correlation_lags
 
+from .tool_paths import resolve_tool_path
+
 
 class CancellationError(Exception):
     pass
@@ -75,6 +77,7 @@ def extract_audio_segment(
     cancel_event: Optional[threading.Event] = None,
     audio_index: int = 0,
 ) -> None:
+    ffmpeg_path = resolve_tool_path(ffmpeg_path, "ffmpeg")
     try:
         proc = subprocess.Popen(
             [
@@ -93,7 +96,7 @@ def extract_audio_segment(
             text=True,
             creationflags=_NO_WINDOW,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         raise RuntimeError(
             f"ffmpeg not found at '{ffmpeg_path}'. "
             "Install ffmpeg: https://ffmpeg.org/download.html"
