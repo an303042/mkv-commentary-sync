@@ -147,9 +147,9 @@ def get_frame_rate(mkv_path: str, ffprobe_path: str = "ffprobe") -> float:
     return float(line)
 
 
-def check_tool(path: str) -> bool:
+def check_tool(path: str, executable_name: str) -> bool:
     """Return True if the binary at `path` is executable."""
-    path = resolve_tool_path(path, path or "")
+    path = resolve_tool_path(path, executable_name)
     try:
         result = subprocess.run(
             [path, "--version"],

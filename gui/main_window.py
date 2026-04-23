@@ -392,9 +392,9 @@ class MainWindow(QWidget):
         mkvmerge_path = self._mkvmerge_edit.text().strip() or "mkvmerge"
 
         rows = []
-        if not check_tool(ffmpeg_path):
+        if not check_tool(ffmpeg_path, "ffmpeg"):
             rows.append(("ffmpeg", "Download ffmpeg", self._on_download_ffmpeg))
-        if not check_tool(mkvmerge_path):
+        if not check_tool(mkvmerge_path, "mkvmerge"):
             rows.append(("mkvmerge", "Get MKVToolNix →", self._on_open_mkvtoolnix))
 
         if rows:

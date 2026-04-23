@@ -2,7 +2,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from core.track_utils import check_tool
 from core.tool_paths import resolve_tool_path, sibling_tool_path
 
 
@@ -42,6 +44,16 @@ class ToolPathTests(unittest.TestCase):
                 sibling_tool_path(tmp, "ffmpeg", "ffprobe"),
                 str(Path(tmp) / ffprobe_name),
             )
+
+    def test_check_tool_uses_expected_executable_name_for_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            exe_name = "mkvmerge.exe" if sys.platform == "win32" else "mkvmerge"
+            tool = Path(tmp) / exe_name
+            tool.touch()
+            with patch("core.track_utils.subprocess.run") as run:
+                run.return_value.returncode = 0
+                self.assertTrue(check_tool(tmp, "mkvmerge"))
+                self.assertEqual(run.call_args.args[0][0], str(tool))
 
 
 if __name__ == "__main__":
