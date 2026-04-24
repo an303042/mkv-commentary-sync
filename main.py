@@ -170,12 +170,20 @@ def _run_cli(args: argparse.Namespace) -> int:
 def _run_gui() -> int:
     # Import Qt only when launching GUI so that headless CLI usage doesn't
     # require PySide6 to be importable.
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
+    from core.app_assets import find_window_icon
     from gui.main_window import MainWindow
 
     app = QApplication(sys.argv)
     app.setApplicationName("MKV Commentary Sync")
+    icon_path = find_window_icon()
+    app_icon = QIcon(str(icon_path)) if icon_path else QIcon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     win = MainWindow()
+    if not app_icon.isNull():
+        win.setWindowIcon(app_icon)
     win.show()
     return app.exec()
 

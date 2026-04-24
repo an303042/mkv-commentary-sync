@@ -1,5 +1,9 @@
 # MKV Commentary Sync
 
+<p align="center">
+  <img src="assets/icons/app_icon.png" alt="MKV Commentary Sync icon" width="160">
+</p>
+
 Adds commentary or dub tracks from one MKV edition of a film to another edition, with timing offset and simple linear drift automatically detected and corrected.
 
 Different releases of the same film often have slightly different runtimes — longer studio logos, alternate intros, frame-rate speed differences, or minor editorial changes. Naively dropping an audio track into the wrong edition can start in sync but drift out over time. This tool compares reference audio from both files, measures the offset, applies timestamp drift correction when the mismatch is linear, and muxes the selected source track(s) into the target. No audio or video is re-encoded.
@@ -72,6 +76,18 @@ To build locally on Windows:
 build.bat
 ```
 Output: `dist/mkvsyncdub.exe`
+
+### App icon assets
+
+Drop your icon files into `assets/icons/` using these names:
+
+- `app_icon.png` for the runtime window icon when running from source and in packaged builds.
+- `app_icon.ico` for the embedded Windows `.exe` icon.
+- `app_icon.icns` if we later switch the macOS release to a native `.app` bundle.
+
+Because both `build.bat` and the GitHub release workflow build through `mkvsyncdub.spec`, the same icon assets are used in both places automatically.
+
+The GitHub repository page icon itself is not controlled by the repo files. To brand that side too, set the repo or org avatar and the repository social preview image in GitHub settings.
 
 ---
 
