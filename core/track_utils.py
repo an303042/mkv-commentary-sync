@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -16,6 +17,31 @@ class AudioTrack:
     codec: str
     channels: Optional[int]
     name: str
+    is_commentary: bool = False
+
+
+_COMMENTARY_NAME_RE = re.compile(r"\bcommentar(?:y|ies)\b", re.IGNORECASE)
+
+
+def is_commentary_track(track: AudioTrack) -> bool:
+    """Return whether track metadata identifies it as commentary.
+
+    Matroska has a dedicated commentary flag, but many existing files only
+    identify commentary in the human-readable track name.
+    """
+    return track.is_commentary or bool(_COMMENTARY_NAME_RE.search(track.name))
+
+
+def default_mux_track_ids(
+    tracks: List[AudioTrack],
+    reference_audio_index: int,
+) -> List[int]:
+    """Choose unambiguous commentary tracks, excluding the sync reference."""
+    return [
+        track.track_id
+        for index, track in enumerate(tracks)
+        if index != reference_audio_index and is_commentary_track(track)
+    ]
 
 
 def identify_tracks(
@@ -55,6 +81,7 @@ def identify_tracks(
                     codec=codec,
                     channels=props.get("audio_channels"),
                     name=props.get("track_name", ""),
+                    is_commentary=props.get("flag_commentary", False),
                 )
             )
     return tracks

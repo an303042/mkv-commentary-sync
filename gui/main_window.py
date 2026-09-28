@@ -35,7 +35,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.track_utils import AudioTrack, check_tool, identify_tracks
+from core.track_utils import (
+    AudioTrack,
+    check_tool,
+    default_mux_track_ids,
+    identify_tracks,
+)
 from core.tool_paths import sibling_tool_path
 from gui.worker import PipelineWorker, WorkerParams
 
@@ -575,9 +580,12 @@ class MainWindow(QWidget):
         self._mux_checkboxes = []
         self._mux_table.setRowCount(len(tracks))
         self._mux_table.setEnabled(bool(tracks))
+        default_track_ids = set(
+            default_mux_track_ids(tracks, self._src_ref_group.checkedId())
+        )
         for row, track in enumerate(tracks):
             cb = QCheckBox()
-            cb.setChecked(row == 0)
+            cb.setChecked(track.track_id in default_track_ids)
             self._mux_checkboxes.append(cb)
             cell = QWidget()
             cl = QHBoxLayout(cell)
