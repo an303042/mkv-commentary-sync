@@ -2,6 +2,9 @@
 setlocal
 
 set "BUILD_ARGS="
+set "PYTHON_CMD=python"
+if exist ".venv\Scripts\python.exe" set "PYTHON_CMD=.venv\Scripts\python.exe"
+
 if /I "%~1"=="clean" (
     set "BUILD_ARGS=--clean"
 )
@@ -15,10 +18,10 @@ if not "%RUNNING_COUNT%"=="0" (
 )
 
 echo Checking PyInstaller...
-python -m PyInstaller --version >nul 2>nul
+%PYTHON_CMD% -m PyInstaller --version >nul 2>nul
 if errorlevel 1 (
     echo PyInstaller not found; installing...
-    python -m pip install pyinstaller pyinstaller-hooks-contrib
+    %PYTHON_CMD% -m pip install pyinstaller pyinstaller-hooks-contrib
     if errorlevel 1 (
         echo.
         echo Failed to install PyInstaller.
@@ -28,7 +31,7 @@ if errorlevel 1 (
     echo PyInstaller is already installed.
 )
 
-python -c "import PyInstaller; import PyInstaller.__main__" >nul 2>nul
+%PYTHON_CMD% -c "import PyInstaller; import PyInstaller.__main__" >nul 2>nul
 if errorlevel 1 (
     echo.
     echo PyInstaller is installed but could not be imported.
@@ -62,7 +65,7 @@ if "%BUILD_ARGS%"=="--clean" (
     echo Running an incremental PyInstaller build. Use "build clean" for a full clean rebuild.
 )
 
-python -m PyInstaller mkvsyncdub.spec %BUILD_ARGS%
+%PYTHON_CMD% -m PyInstaller mkvsyncdub.spec %BUILD_ARGS%
 if errorlevel 1 (
     echo.
     echo Build failed - PyInstaller exited with an error.
