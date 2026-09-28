@@ -256,19 +256,49 @@ class MainWindow(QWidget):
         self._sample_start.setRange(0, 7200)
         self._sample_start.setValue(120)
         self._sample_start.setSuffix(" s")
+        self._sample_start.setToolTip(
+            "Position (seconds from the start) where audio sampling begins.\n"
+            "Skip title cards and credits — aim for dialogue or active content.\n"
+            "Default: 120 s. Recommended range: 60–600 s."
+        )
 
         self._sample_duration = QSpinBox()
         self._sample_duration.setRange(10, 3600)
         self._sample_duration.setValue(300)
         self._sample_duration.setSuffix(" s")
+        self._sample_duration.setToolTip(
+            "Duration of each audio clip used for correlation.\n"
+            "Longer clips improve accuracy at the cost of processing time.\n"
+            "Default: 300 s. Recommended range: 120–600 s."
+        )
 
-        self._sample_rate = QSpinBox()
-        self._sample_rate.setRange(4000, 44100)
-        self._sample_rate.setValue(8000)
-        self._sample_rate.setSuffix(" Hz")
+        self._rate_group = QButtonGroup(self)
+        rate_widget = QWidget()
+        rate_layout = QHBoxLayout(rate_widget)
+        rate_layout.setContentsMargins(0, 0, 0, 0)
+        rate_layout.setSpacing(12)
+        for rate, label, tooltip in [
+            (8000, "8 kHz", "Fast — ideal for speech-heavy audio. Default and recommended."),
+            (16000, "16 kHz", "Balanced — useful for music or when 8 kHz gives weak scores."),
+            (22050, "22 kHz", "Highest precision — slowest and most memory-intensive."),
+        ]:
+            radio = QRadioButton(label)
+            radio.setToolTip(tooltip)
+            self._rate_group.addButton(radio, rate)
+            rate_layout.addWidget(radio)
+        rate_layout.addStretch()
+        self._rate_group.button(8000).setChecked(True)
 
         self._ffmpeg_edit = QLineEdit("ffmpeg")
+        self._ffmpeg_edit.setToolTip(
+            "Path to the ffmpeg executable used for audio extraction.\n"
+            "Enter 'ffmpeg' if it is on PATH, or enter the executable/install folder."
+        )
         self._mkvmerge_edit = QLineEdit("mkvmerge")
+        self._mkvmerge_edit.setToolTip(
+            "Path to mkvmerge from MKVToolNix.\n"
+            "Enter 'mkvmerge' if it is on PATH, or enter the executable/install folder."
+        )
         self._ffmpeg_edit.editingFinished.connect(self._check_tools)
         self._mkvmerge_edit.editingFinished.connect(self._on_mkvmerge_path_changed)
 
@@ -278,21 +308,27 @@ class MainWindow(QWidget):
         self._min_ncc.setDecimals(3)
         self._min_ncc.setValue(0.02)
         self._min_ncc.setToolTip(
-            "Minimum NCC score to accept a sample point.\n"
-            "Lower this (e.g. 0.01) if all points are rejected — stereo vs surround\n"
-            "or different audio masters can suppress NCC even for matching content."
+            "Minimum normalized cross-correlation score accepted for a sample.\n"
+            "Default: 0.02. Raise it to reject weak matches, or lower it if\n"
+            "different audio masters suppress otherwise consistent scores."
         )
 
-        for row, (label, widget) in enumerate([
-            ("Sample start:", self._sample_start),
-            ("Sample duration:", self._sample_duration),
-            ("Sample rate:", self._sample_rate),
-            ("Min. NCC:", self._min_ncc),
-            ("ffmpeg path:", self._ffmpeg_edit),
-            ("mkvmerge path:", self._mkvmerge_edit),
-        ]):
-            adv_form.addWidget(QLabel(label), row, 0)
-            adv_form.addWidget(widget, row, 1)
+        rate_label = QLabel("Sample rate:")
+        rate_label.setToolTip(
+            "Sample rate used during correlation. Higher rates increase processing time."
+        )
+        adv_form.addWidget(QLabel("Sample start:"), 0, 0)
+        adv_form.addWidget(self._sample_start, 0, 1)
+        adv_form.addWidget(QLabel("Sample duration:"), 1, 0)
+        adv_form.addWidget(self._sample_duration, 1, 1)
+        adv_form.addWidget(rate_label, 2, 0)
+        adv_form.addWidget(rate_widget, 2, 1)
+        adv_form.addWidget(QLabel("Min. NCC:"), 3, 0)
+        adv_form.addWidget(self._min_ncc, 3, 1)
+        adv_form.addWidget(QLabel("ffmpeg path:"), 4, 0)
+        adv_form.addWidget(self._ffmpeg_edit, 4, 1)
+        adv_form.addWidget(QLabel("mkvmerge path:"), 5, 0)
+        adv_form.addWidget(self._mkvmerge_edit, 5, 1)
 
         adv.setContentLayout(adv_form)
         output_layout.addWidget(adv)
@@ -370,7 +406,10 @@ class MainWindow(QWidget):
         self._mkvmerge_edit.setText(self._settings.value("mkvmerge_path", "mkvmerge"))
         self._sample_start.setValue(int(self._settings.value("sample_start", 120)))
         self._sample_duration.setValue(int(self._settings.value("sample_duration", 300)))
-        self._sample_rate.setValue(int(self._settings.value("sample_rate", 8000)))
+        saved_rate = int(self._settings.value("sample_rate", 8000))
+        rate_button = self._rate_group.button(saved_rate)
+        if rate_button:
+            rate_button.setChecked(True)
         self._min_ncc.setValue(float(self._settings.value("min_ncc", 0.02)))
 
     def closeEvent(self, event) -> None:
@@ -381,7 +420,7 @@ class MainWindow(QWidget):
         self._settings.setValue("mkvmerge_path", self._mkvmerge_edit.text())
         self._settings.setValue("sample_start", self._sample_start.value())
         self._settings.setValue("sample_duration", self._sample_duration.value())
-        self._settings.setValue("sample_rate", self._sample_rate.value())
+        self._settings.setValue("sample_rate", self._rate_group.checkedId())
         self._settings.setValue("min_ncc", self._min_ncc.value())
         super().closeEvent(event)
 
@@ -398,7 +437,12 @@ class MainWindow(QWidget):
 
         rows = []
         if not check_tool(ffmpeg_path, "ffmpeg"):
-            rows.append(("ffmpeg", "Download ffmpeg", self._on_download_ffmpeg))
+            if sys.platform == "win32":
+                rows.append(("ffmpeg", "Download ffmpeg", self._on_download_ffmpeg))
+            elif sys.platform == "darwin":
+                rows.append(("ffmpeg", "How to install →", self._on_ffmpeg_install_macos))
+            else:
+                rows.append(("ffmpeg", "How to install →", self._on_ffmpeg_install_linux))
         if not check_tool(mkvmerge_path, "mkvmerge"):
             rows.append(("mkvmerge", "Get MKVToolNix →", self._on_open_mkvtoolnix))
 
@@ -441,6 +485,26 @@ class MainWindow(QWidget):
             lambda ok, result: self._on_ffmpeg_download_done(ok, result, dlg)
         )
         self._ffmpeg_dl_thread.start()
+
+    def _on_ffmpeg_install_macos(self) -> None:
+        QMessageBox.information(
+            self,
+            "Install ffmpeg on macOS",
+            "Install ffmpeg using Homebrew:\n\n"
+            "    brew install ffmpeg\n\n"
+            "After installing, restart the app or set the path in Advanced.",
+        )
+
+    def _on_ffmpeg_install_linux(self) -> None:
+        QMessageBox.information(
+            self,
+            "Install ffmpeg on Linux",
+            "Install ffmpeg using your distribution's package manager:\n\n"
+            "    Ubuntu / Debian:  sudo apt install ffmpeg\n"
+            "    Fedora:           sudo dnf install ffmpeg\n"
+            "    Arch / Manjaro:   sudo pacman -S ffmpeg\n\n"
+            "After installing, restart the app or set the path in Advanced.",
+        )
 
     def _on_ffmpeg_download_done(self, success: bool, result: str, dlg: QProgressDialog) -> None:
         dlg.close()
@@ -661,6 +725,17 @@ class MainWindow(QWidget):
                 self._log_panel.append_message(f"✗ {e}", "error")
             return
 
+        if os.path.exists(output):
+            reply = QMessageBox.question(
+                self,
+                "Output file already exists",
+                f"The output file already exists:\n{output}\n\nOverwrite it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         ffmpeg_path = self._ffmpeg_edit.text().strip() or "ffmpeg"
         params = WorkerParams(
             source_path=source,
@@ -669,7 +744,7 @@ class MainWindow(QWidget):
             output_path=output,
             sample_start=self._sample_start.value(),
             sample_duration=self._sample_duration.value(),
-            sample_rate=self._sample_rate.value(),
+            sample_rate=self._rate_group.checkedId(),
             ffmpeg_path=ffmpeg_path,
             ffprobe_path=sibling_tool_path(ffmpeg_path, "ffmpeg", "ffprobe"),
             mkvmerge_path=self._mkvmerge_edit.text().strip() or "mkvmerge",

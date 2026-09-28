@@ -44,6 +44,7 @@ CONFIDENCE_THRESHOLD = 0.5
 CONSISTENCY_TOLERANCE_MS = 50
 # Slope magnitude below this (ms/s) is treated as a constant offset, not drift
 DRIFT_THRESHOLD_MS_PER_S = 0.5
+MIN_RELIABLE_SAMPLES = 3
 
 
 def _ms_to_hms(ms: int) -> str:
@@ -94,6 +95,7 @@ def extract_audio_segment(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            errors="replace",
             creationflags=_NO_WINDOW,
         )
     except (FileNotFoundError, OSError):
@@ -105,9 +107,15 @@ def extract_audio_segment(
     # Drain stderr in a background thread to prevent pipe-buffer deadlock
     # (ffmpeg is verbose; the buffer fills and proc.wait() never returns).
     stderr_holder: list[str] = []
+    stderr_read_errors: list[str] = []
 
     def _drain() -> None:
-        stderr_holder.append(proc.communicate()[1])
+        try:
+            stderr_holder.append(proc.communicate()[1] or "")
+        except Exception as exc:
+            stderr_read_errors.append(
+                f"Could not read ffmpeg diagnostics: {type(exc).__name__}: {exc}"
+            )
 
     drain_thread = threading.Thread(target=_drain, daemon=True)
     drain_thread.start()
@@ -122,8 +130,19 @@ def extract_audio_segment(
             raise CancellationError()
 
     if proc.returncode != 0:
-        stderr_text = stderr_holder[0] if stderr_holder else ""
-        raise RuntimeError(f"ffmpeg audio extraction failed:\n{stderr_text[-2000:]}")
+        stderr_text = stderr_holder[0].strip() if stderr_holder else ""
+        if not stderr_text:
+            stderr_text = (
+                stderr_read_errors[0]
+                if stderr_read_errors
+                else "ffmpeg produced no diagnostic output."
+            )
+        raise RuntimeError(
+            f"ffmpeg audio extraction failed (exit code {proc.returncode}).\n"
+            f"Input: {mkv_path}\n"
+            f"Selected audio stream: 0:a:{audio_index}\n"
+            f"{stderr_text[-2000:]}"
+        )
 
 
 def _load_wav_mono(path: str) -> Tuple[int, np.ndarray]:
@@ -159,6 +178,17 @@ def _normalized_xcorr(a: np.ndarray, b: np.ndarray) -> Tuple[int, float]:
 
 def _rms(data: np.ndarray) -> float:
     return float(np.sqrt(np.mean(data ** 2))) if len(data) else 0.0
+
+
+def _require_reliable_sample_count(passed: int, attempted: int) -> None:
+    """Reject an offset that is supported by too few sample points."""
+    if passed < MIN_RELIABLE_SAMPLES:
+        raise RuntimeError(
+            f"Only {passed}/{attempted} sample points met the minimum NCC threshold — "
+            f"need at least {MIN_RELIABLE_SAMPLES} for reliable offset detection.\n"
+            "Try adjusting Sample Start / Sample Duration to avoid silent passages, "
+            "or lower Min. NCC in Advanced if the files use different audio masters."
+        )
 
 
 def _track_label(mkv_path: str, mkvmerge_path: str, audio_index: int = 0) -> str:
@@ -302,20 +332,7 @@ def detect_offset(
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    if not good_samples:
-        raise RuntimeError(
-            "All sample points were below the minimum NCC threshold — audio segments "
-            "appear to be silent or corrupt.\n"
-            "Try adjusting Sample Start / Sample Duration to land on sections with dialogue."
-        )
-
-    # ── Single usable point: return as constant offset ────────────────────────
-    if len(good_samples) == 1:
-        final_offset = good_samples[0][2]
-        log(f"✓ Offset: {final_offset:+d} ms (single usable sample point)")
-        if abs(final_offset) > 30_000:
-            log(f"⚠ Large offset ({final_offset:+d} ms) — verify before proceeding.")
-        return SyncResult(offset_ms=final_offset, source_duration_ms=source_duration_ms)
+    _require_reliable_sample_count(len(good_samples), len(points))
 
     # ── Fit linear model: offset(t) = slope * t + intercept ──────────────────
     ts = np.array([s[0] for s in good_samples], dtype=np.float64)       # seconds

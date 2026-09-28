@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-MKVTOOLNIX_URL = "https://mkvtoolnix.download/downloads.html#windows"
 
 
 def get_tools_dir() -> Path:
@@ -90,4 +89,9 @@ def download_ffmpeg(
 
 
 def open_mkvtoolnix_page() -> None:
-    webbrowser.open(MKVTOOLNIX_URL)
+    if sys.platform == "win32":
+        webbrowser.open("https://mkvtoolnix.download/downloads.html#windows")
+    elif sys.platform == "darwin":
+        webbrowser.open("https://mkvtoolnix.download/downloads.html#macos")
+    else:
+        webbrowser.open("https://mkvtoolnix.download/downloads.html")
