@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from itertools import combinations
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
@@ -32,6 +33,27 @@ class SyncResult:
     source_duration_ms: int = 0
 
 
+@dataclass(frozen=True)
+class CorrelationMetrics:
+    """Measurements used to judge whether a correlation peak is credible."""
+
+    lag_samples: int
+    peak_ncc: float
+    runner_up_ncc: float
+    peak_prominence: float
+
+
+@dataclass(frozen=True)
+class OffsetSample:
+    """One provisional offset reading from a point in the file."""
+
+    start: float
+    label: str
+    offset_ms: int
+    ncc: float
+    prominence: float
+
+
 # NCC below this means the lag reading is too noisy to trust — exclude the sample.
 # Note: for long samples (300s @ 8kHz = 2.4M pts) the noise floor is ~0.0006,
 # so even 0.02 is ~33σ above noise and statistically meaningful.
@@ -40,6 +62,13 @@ class SyncResult:
 CONFIDENCE_MINIMUM = 0.02
 # NCC below this is worth a warning but the sample is still usable
 CONFIDENCE_THRESHOLD = 0.5
+# Automatic mode uses a low hard floor, then relies on peak distinctness and
+# agreement across time instead of pretending that one NCC value fits all media.
+AUTOMATIC_NCC_FLOOR = 0.01
+AUTOMATIC_SILENCE_RMS = 50.0
+AUTOMATIC_DISTINCTIVE_PROMINENCE = 0.10
+AUTOMATIC_STRONG_NCC = 0.10
+PEAK_EXCLUSION_SECONDS = 1.0
 # Linear-fit residuals must be within this to trust the model
 CONSISTENCY_TOLERANCE_MS = 50
 # Slope magnitude below this (ms/s) is treated as a constant offset, not drift
@@ -152,12 +181,19 @@ def _load_wav_mono(path: str) -> Tuple[int, np.ndarray]:
     return rate, data.astype(np.float64)
 
 
-def _normalized_xcorr(a: np.ndarray, b: np.ndarray) -> Tuple[int, float]:
+def _correlation_metrics(
+    a: np.ndarray,
+    b: np.ndarray,
+    peak_exclusion_samples: int = 1,
+) -> CorrelationMetrics:
     """
-    Cross-correlate a (target) and b (source).  Returns (lag_samples, confidence).
+    Cross-correlate a (target) and b (source), including peak distinctness.
 
     lag > 0  →  source starts later than target  →  positive offset_ms
     lag < 0  →  source starts earlier than target
+
+    The runner-up excludes a neighbourhood around the winning lag so that the
+    natural width of one peak is not mistaken for a competing alignment.
     """
     a = a - np.mean(a)
     b = b - np.mean(b)
@@ -167,13 +203,32 @@ def _normalized_xcorr(a: np.ndarray, b: np.ndarray) -> Tuple[int, float]:
 
     norm = np.sqrt(np.dot(a, a) * np.dot(b, b))
     if norm < 1e-10:
-        return 0, 0.0
+        return CorrelationMetrics(0, 0.0, 0.0, 0.0)
 
-    corr_norm = corr / norm
-    peak_idx = int(np.argmax(corr_norm))
+    peak_idx = int(np.argmax(corr))
     lag = int(lags[peak_idx])
-    confidence = float(corr_norm[peak_idx])
-    return lag, confidence
+    peak_ncc = float(corr[peak_idx] / norm)
+
+    radius = max(1, int(peak_exclusion_samples))
+    before = corr[:max(0, peak_idx - radius)]
+    after = corr[min(len(corr), peak_idx + radius + 1):]
+    runner_values = []
+    if before.size:
+        runner_values.append(float(np.max(before)))
+    if after.size:
+        runner_values.append(float(np.max(after)))
+    runner_up_ncc = max(runner_values) / norm if runner_values else 0.0
+    prominence = max(
+        0.0,
+        min(1.0, (peak_ncc - runner_up_ncc) / max(abs(peak_ncc), 1e-12)),
+    )
+    return CorrelationMetrics(lag, peak_ncc, runner_up_ncc, prominence)
+
+
+def _normalized_xcorr(a: np.ndarray, b: np.ndarray) -> Tuple[int, float]:
+    """Backward-compatible wrapper returning the winning lag and NCC only."""
+    metrics = _correlation_metrics(a, b)
+    return metrics.lag_samples, metrics.peak_ncc
 
 
 def _rms(data: np.ndarray) -> float:
@@ -189,6 +244,114 @@ def _require_reliable_sample_count(passed: int, attempted: int) -> None:
             "Try adjusting Sample Start / Sample Duration to avoid silent passages, "
             "or lower Min. NCC in Advanced if the files use different audio masters."
         )
+
+
+def _sample_evidence(sample: OffsetSample) -> float:
+    """Rank equally sized timing consensuses by NCC and peak distinctness."""
+    return max(sample.ncc, 0.0) * (0.25 + 0.75 * sample.prominence)
+
+
+def _model_tolerance(
+    slope: float,
+    fps_mismatch: bool,
+    fps_predicted_slope: float,
+) -> float:
+    slope_consistent_with_fps = (
+        fps_mismatch
+        and abs(slope) > DRIFT_THRESHOLD_MS_PER_S
+        and fps_predicted_slope != 0.0
+        and abs(slope - fps_predicted_slope) <= abs(fps_predicted_slope) * 3.0
+    )
+    return (
+        CONSISTENCY_TOLERANCE_MS * 4
+        if slope_consistent_with_fps
+        else CONSISTENCY_TOLERANCE_MS
+    )
+
+
+def _select_automatic_consensus(
+    samples: List[OffsetSample],
+    fps_mismatch: bool = False,
+    fps_predicted_slope: float = 0.0,
+) -> List[OffsetSample]:
+    """Choose the best offset/drift consensus while rejecting unsafe conflicts."""
+    _require_reliable_sample_count(len(samples), len(samples))
+
+    models: List[Tuple[float, float]] = []
+    # Constant-offset candidates are important: a pair-derived line would
+    # otherwise overfit tiny timing noise into artificial drift.
+    for sample in samples:
+        models.append((0.0, float(sample.offset_ms)))
+    for left, right in combinations(samples, 2):
+        delta_t = right.start - left.start
+        if abs(delta_t) < 1e-9:
+            continue
+        slope = (right.offset_ms - left.offset_ms) / delta_t
+        intercept = left.offset_ms - slope * left.start
+        models.append((slope, intercept))
+
+    best: Optional[List[OffsetSample]] = None
+    best_score: Optional[Tuple[int, float, float]] = None
+    for slope, intercept in models:
+        tolerance = _model_tolerance(slope, fps_mismatch, fps_predicted_slope)
+        inliers = [
+            sample
+            for sample in samples
+            if abs(sample.offset_ms - (slope * sample.start + intercept)) <= tolerance
+        ]
+        if len(inliers) < MIN_RELIABLE_SAMPLES:
+            continue
+        residual_sum = sum(
+            abs(sample.offset_ms - (slope * sample.start + intercept))
+            for sample in inliers
+        )
+        score = (
+            len(inliers),
+            sum(_sample_evidence(sample) for sample in inliers),
+            -residual_sum,
+        )
+        if best_score is None or score > best_score:
+            best = inliers
+            best_score = score
+
+    if best is None:
+        detail = "\n".join(
+            f"  {sample.label}: {sample.offset_ms:+d} ms "
+            f"(NCC {sample.ncc:.3f}, separation {sample.prominence:.0%})"
+            for sample in samples
+        )
+        raise RuntimeError(
+            "Automatic validation could not find three consistent offset readings:\n"
+            f"{detail}\n\nThe files may use different edits, or the sampled passages may "
+            "contain repetitive/uncorrelated audio."
+        )
+
+    ts = np.array([sample.start for sample in best], dtype=np.float64)
+    offsets = np.array([sample.offset_ms for sample in best], dtype=np.float64)
+    slope, intercept = np.polyfit(ts, offsets, 1)
+    tolerance = _model_tolerance(float(slope), fps_mismatch, fps_predicted_slope)
+
+    excluded = [sample for sample in samples if sample not in best]
+    strong_conflicts = [
+        sample
+        for sample in excluded
+        if sample.ncc >= AUTOMATIC_STRONG_NCC
+        and sample.prominence >= AUTOMATIC_DISTINCTIVE_PROMINENCE
+        and abs(sample.offset_ms - (slope * sample.start + intercept)) > tolerance
+    ]
+    if strong_conflicts:
+        detail = "\n".join(
+            f"  {sample.label}: {sample.offset_ms:+d} ms "
+            f"(NCC {sample.ncc:.3f}, separation {sample.prominence:.0%})"
+            for sample in strong_conflicts
+        )
+        raise RuntimeError(
+            "Strong correlation readings contradict the main timing model:\n"
+            f"{detail}\n\nThe editions likely differ partway through; a single delay or "
+            "uniform drift correction would be unsafe."
+        )
+
+    return best
 
 
 def _track_label(mkv_path: str, mkvmerge_path: str, audio_index: int = 0) -> str:
@@ -219,6 +382,7 @@ def detect_offset(
     src_ref_audio_index: int = 0,
     tgt_ref_audio_index: int = 0,
     min_ncc: float = CONFIDENCE_MINIMUM,
+    automatic_ncc: bool = True,
 ) -> SyncResult:
     """
     Run multi-point cross-correlation to find timing offset and optional linear drift.
@@ -275,15 +439,26 @@ def detect_offset(
         shorter_dur * 0.75,
     ]
     points = [p for p in points if p + sample_duration <= shorter_dur]
+    # A user-selected start can coincide with a percentage point. Counting the
+    # same audio twice would create fake independent support for a result.
+    points = list(dict.fromkeys(round(p, 6) for p in points))
     if not points:
         raise RuntimeError(
             "Files are too short to extract sample points with the given settings."
         )
 
+    if automatic_ncc:
+        log(
+            "NCC validation: automatic (audio energy, peak distinctness, and "
+            "cross-point timing agreement)."
+        )
+    else:
+        log(f"NCC validation: manual threshold {min_ncc:.3f}.")
     log(f"Sampling {len(points)} points…")
 
-    # Each entry: (start_seconds, label, offset_ms)
-    good_samples: List[Tuple[float, str, int]] = []
+    # In automatic mode these are provisional until cross-point consensus is
+    # evaluated. Manual mode retains the old fixed-threshold behaviour.
+    good_samples: List[OffsetSample] = []
 
     # Unique temp dir per run: prefix includes a sanitised fragment of the
     # source filename so it's identifiable in task manager / temp dir listings.
@@ -306,37 +481,89 @@ def detect_offset(
             _, src_data = _load_wav_mono(src_wav)
             _, tgt_data = _load_wav_mono(tgt_wav)
 
-            # Threshold calibrated for int16 PCM (range ±32767)
-            silence_threshold = 50.0
             src_rms = _rms(src_data)
             tgt_rms = _rms(tgt_data)
-            if src_rms < silence_threshold:
+            if src_rms < AUTOMATIC_SILENCE_RMS:
                 log(f"  ⚠ Source audio near-silence at this point (RMS {src_rms:.1f})")
-            if tgt_rms < silence_threshold:
+            if tgt_rms < AUTOMATIC_SILENCE_RMS:
                 log(f"  ⚠ Target audio near-silence at this point (RMS {tgt_rms:.1f})")
 
-            lag, confidence = _normalized_xcorr(tgt_data, src_data)
-            offset_ms = round((lag / sample_rate) * 1000)
+            metrics = _correlation_metrics(
+                tgt_data,
+                src_data,
+                peak_exclusion_samples=round(sample_rate * PEAK_EXCLUSION_SECONDS),
+            )
+            offset_ms = round((metrics.lag_samples / sample_rate) * 1000)
+            sample = OffsetSample(
+                start=start,
+                label=time_label,
+                offset_ms=offset_ms,
+                ncc=metrics.peak_ncc,
+                prominence=metrics.peak_prominence,
+            )
 
-            if confidence < min_ncc:
+            if automatic_ncc and (
+                src_rms < AUTOMATIC_SILENCE_RMS
+                or tgt_rms < AUTOMATIC_SILENCE_RMS
+            ):
+                log("  ✗ Excluded near-silent sample from automatic validation.")
+            elif automatic_ncc and metrics.peak_ncc < AUTOMATIC_NCC_FLOOR:
                 log(
-                    f"  ✗ NCC {confidence:.3f} below minimum ({min_ncc:.2f}) — excluded "
-                    f"(tentative: {offset_ms:+d} ms). "
-                    "Lower Min. NCC in Advanced if all points fail."
+                    f"  ✗ NCC {metrics.peak_ncc:.3f} below automatic safety floor "
+                    f"({AUTOMATIC_NCC_FLOOR:.2f}) — excluded "
+                    f"(tentative: {offset_ms:+d} ms)."
+                )
+            elif automatic_ncc:
+                good_samples.append(sample)
+                distinction = (
+                    "distinct"
+                    if metrics.peak_prominence >= AUTOMATIC_DISTINCTIVE_PROMINENCE
+                    else "ambiguous ⚠"
+                )
+                log(
+                    f"  → {offset_ms:+d} ms  (NCC {metrics.peak_ncc:.3f}, "
+                    f"peak separation {metrics.peak_prominence:.0%}, {distinction})"
+                )
+            elif metrics.peak_ncc < min_ncc:
+                log(
+                    f"  ✗ NCC {metrics.peak_ncc:.3f} below manual minimum "
+                    f"({min_ncc:.3f}) — excluded (tentative: {offset_ms:+d} ms)."
                 )
             else:
-                good_samples.append((start, time_label, offset_ms))
-                conf_display = f"NCC {confidence:.3f}" + ("" if confidence >= CONFIDENCE_THRESHOLD else " ⚠")
+                good_samples.append(sample)
+                conf_display = f"NCC {metrics.peak_ncc:.3f}" + (
+                    "" if metrics.peak_ncc >= CONFIDENCE_THRESHOLD else " ⚠"
+                )
                 log(f"  → {offset_ms:+d} ms  ({conf_display})")
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    _require_reliable_sample_count(len(good_samples), len(points))
+    if automatic_ncc:
+        candidate_count = len(good_samples)
+        if candidate_count < MIN_RELIABLE_SAMPLES:
+            raise RuntimeError(
+                f"Only {candidate_count}/{len(points)} sample points were usable in "
+                "automatic validation — need at least 3.\nTry adjusting Sample Start / "
+                "Sample Duration to avoid silence, or use manual NCC validation in "
+                "Advanced if you understand the risk."
+            )
+        good_samples = _select_automatic_consensus(
+            good_samples,
+            fps_mismatch=fps_mismatch,
+            fps_predicted_slope=fps_predicted_slope,
+        )
+        if len(good_samples) < candidate_count:
+            log(
+                f"⚠ Automatic validation discarded {candidate_count - len(good_samples)} "
+                "weak/ambiguous outlier(s); the remaining readings agree."
+            )
+    else:
+        _require_reliable_sample_count(len(good_samples), len(points))
 
     # ── Fit linear model: offset(t) = slope * t + intercept ──────────────────
-    ts = np.array([s[0] for s in good_samples], dtype=np.float64)       # seconds
-    os_arr = np.array([s[2] for s in good_samples], dtype=np.float64)   # ms
+    ts = np.array([s.start for s in good_samples], dtype=np.float64)       # seconds
+    os_arr = np.array([s.offset_ms for s in good_samples], dtype=np.float64)   # ms
 
     slope, intercept = np.polyfit(ts, os_arr, 1)   # slope in ms/s
     residuals = os_arr - (slope * ts + intercept)
@@ -345,18 +572,14 @@ def detect_offset(
     # When fps metadata predicts drift and the measured slope is in the same
     # ballpark, noisy low-NCC readings can produce residuals of 100–200ms while
     # still being on the correct line.  Relax the tolerance in that case.
-    slope_consistent_with_fps = (
-        fps_mismatch
-        and abs(slope) > DRIFT_THRESHOLD_MS_PER_S
-        and fps_predicted_slope != 0.0
-        and abs(slope - fps_predicted_slope) <= abs(fps_predicted_slope) * 3.0
+    effective_tolerance = _model_tolerance(
+        float(slope), fps_mismatch, fps_predicted_slope
     )
-    effective_tolerance = CONSISTENCY_TOLERANCE_MS * 4 if slope_consistent_with_fps else CONSISTENCY_TOLERANCE_MS
 
     if max_residual > effective_tolerance:
         detail = "\n".join(
-            f"  Point {i+1} ({lbl}): {off:+d} ms"
-            for i, (_, lbl, off) in enumerate(good_samples)
+            f"  Point {i+1} ({sample.label}): {sample.offset_ms:+d} ms"
+            for i, sample in enumerate(good_samples)
         )
         hint = (
             "\n\nThe fps metadata suggests drift, but the offsets do not fit a line — "

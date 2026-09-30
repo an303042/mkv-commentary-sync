@@ -25,6 +25,7 @@ class WorkerParams:
         src_ref_audio_index: int = 0,
         tgt_ref_audio_index: int = 0,
         min_ncc: float = 0.02,
+        automatic_ncc: bool = True,
     ):
         self.source_path = source_path
         self.target_path = target_path
@@ -40,6 +41,7 @@ class WorkerParams:
         self.src_ref_audio_index = src_ref_audio_index
         self.tgt_ref_audio_index = tgt_ref_audio_index
         self.min_ncc = min_ncc
+        self.automatic_ncc = automatic_ncc
 
 
 class PipelineWorker(QThread):
@@ -111,6 +113,7 @@ class PipelineWorker(QThread):
                 src_ref_audio_index=p.src_ref_audio_index,
                 tgt_ref_audio_index=p.tgt_ref_audio_index,
                 min_ncc=p.min_ncc,
+                automatic_ncc=p.automatic_ncc,
             )
 
             self.offset_detected.emit(result.offset_ms)

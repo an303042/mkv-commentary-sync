@@ -188,7 +188,25 @@ def _run_gui() -> int:
     return app.exec()
 
 
+def _run_gui_smoke_test() -> int:
+    """Import and construct the packaged GUI without showing a window."""
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtWidgets import QApplication
+    from gui.main_window import MainWindow
+
+    app = QApplication([])
+    window = MainWindow()
+    window.deleteLater()
+    app.processEvents()
+    return 0
+
+
 def main() -> None:
+    # Used by build.bat to catch packaged Qt/DLL failures before reporting a
+    # successful build. Deliberately kept out of the public CLI help.
+    if sys.argv[1:] == ["--gui-smoke-test"]:
+        sys.exit(_run_gui_smoke_test())
+
     # If called with no arguments, launch GUI
     if len(sys.argv) == 1:
         sys.exit(_run_gui())

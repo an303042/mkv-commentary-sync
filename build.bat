@@ -1,12 +1,24 @@
 @echo off
 setlocal
 
-set "BUILD_ARGS="
+rem Clean by default so cached Qt DLLs from another Python/PySide environment
+rem cannot leak into the executable. Use "build fast" only when dependencies
+rem have not changed and a quick source-only rebuild is desired.
+set "BUILD_ARGS=--clean"
 set "PYTHON_CMD=python"
 if exist ".venv\Scripts\python.exe" set "PYTHON_CMD=.venv\Scripts\python.exe"
 
-if /I "%~1"=="clean" (
-    set "BUILD_ARGS=--clean"
+%PYTHON_CMD% -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo Build requires Python 3.11. Python 3.13 currently produces a broken frozen QtGui runtime.
+    echo Create .venv with: py -3.11 -m venv .venv
+    echo Then install: .venv\Scripts\python -m pip install -r requirements.txt
+    exit /b 1
+)
+
+if /I "%~1"=="fast" (
+    set "BUILD_ARGS="
 )
 
 for /f %%I in ('powershell -NoProfile -Command "(Get-Process -Name 'mkvsyncdub' -ErrorAction SilentlyContinue | Measure-Object).Count"') do set "RUNNING_COUNT=%%I"
@@ -21,7 +33,7 @@ echo Checking PyInstaller...
 %PYTHON_CMD% -m PyInstaller --version >nul 2>nul
 if errorlevel 1 (
     echo PyInstaller not found; installing...
-    %PYTHON_CMD% -m pip install pyinstaller pyinstaller-hooks-contrib
+    %PYTHON_CMD% -m pip install pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.7
     if errorlevel 1 (
         echo.
         echo Failed to install PyInstaller.
@@ -59,10 +71,10 @@ if exist dist\mkvsyncdub.exe (
     )
 )
 
-if "%BUILD_ARGS%"=="--clean" (
-    echo Running a clean PyInstaller build...
+if "%BUILD_ARGS%"=="" (
+    echo Running an incremental PyInstaller build...
 ) else (
-    echo Running an incremental PyInstaller build. Use "build clean" for a full clean rebuild.
+    echo Running a clean PyInstaller build. Use "build fast" for an incremental rebuild.
 )
 
 %PYTHON_CMD% -m PyInstaller mkvsyncdub.spec %BUILD_ARGS%
@@ -74,6 +86,13 @@ if errorlevel 1 (
 
 echo.
 if exist dist\mkvsyncdub.exe (
+    echo Verifying packaged GUI startup...
+    dist\mkvsyncdub.exe --gui-smoke-test >nul 2>nul
+    if errorlevel 1 (
+        echo.
+        echo Build failed - the packaged GUI could not start.
+        exit /b 1
+    )
     echo Build successful: dist\mkvsyncdub.exe
 ) else (
     echo Build failed - check output above.

@@ -1,4 +1,6 @@
 numpy>=1.24
 scipy>=1.10
-PySide6>=6.5
+# Qt 6.10+ frozen builds fail to load QtGui on the supported Windows setup.
+# The app only uses modules included in Essentials.
+PySide6_Essentials==6.9.3
 rich>=13.0

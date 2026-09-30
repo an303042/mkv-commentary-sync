@@ -308,10 +308,19 @@ class MainWindow(QWidget):
         self._min_ncc.setDecimals(3)
         self._min_ncc.setValue(0.02)
         self._min_ncc.setToolTip(
-            "Minimum normalized cross-correlation score accepted for a sample.\n"
-            "Default: 0.02. Raise it to reject weak matches, or lower it if\n"
-            "different audio masters suppress otherwise consistent scores."
+            "Manual minimum normalized cross-correlation score.\n"
+            "Used only when automatic validation is disabled."
         )
+        self._automatic_ncc = QCheckBox("Automatic (recommended)")
+        self._automatic_ncc.setChecked(True)
+        self._automatic_ncc.setToolTip(
+            "Evaluates silence, NCC peak distinctness, and agreement across multiple\n"
+            "points. Strong contradictory readings stop the run for safety."
+        )
+        self._automatic_ncc.toggled.connect(
+            lambda checked: self._min_ncc.setEnabled(not checked)
+        )
+        self._min_ncc.setEnabled(False)
 
         rate_label = QLabel("Sample rate:")
         rate_label.setToolTip(
@@ -323,12 +332,14 @@ class MainWindow(QWidget):
         adv_form.addWidget(self._sample_duration, 1, 1)
         adv_form.addWidget(rate_label, 2, 0)
         adv_form.addWidget(rate_widget, 2, 1)
-        adv_form.addWidget(QLabel("Min. NCC:"), 3, 0)
-        adv_form.addWidget(self._min_ncc, 3, 1)
-        adv_form.addWidget(QLabel("ffmpeg path:"), 4, 0)
-        adv_form.addWidget(self._ffmpeg_edit, 4, 1)
-        adv_form.addWidget(QLabel("mkvmerge path:"), 5, 0)
-        adv_form.addWidget(self._mkvmerge_edit, 5, 1)
+        adv_form.addWidget(QLabel("NCC validation:"), 3, 0)
+        adv_form.addWidget(self._automatic_ncc, 3, 1)
+        adv_form.addWidget(QLabel("Manual Min. NCC:"), 4, 0)
+        adv_form.addWidget(self._min_ncc, 4, 1)
+        adv_form.addWidget(QLabel("ffmpeg path:"), 5, 0)
+        adv_form.addWidget(self._ffmpeg_edit, 5, 1)
+        adv_form.addWidget(QLabel("mkvmerge path:"), 6, 0)
+        adv_form.addWidget(self._mkvmerge_edit, 6, 1)
 
         adv.setContentLayout(adv_form)
         output_layout.addWidget(adv)
@@ -411,6 +422,9 @@ class MainWindow(QWidget):
         if rate_button:
             rate_button.setChecked(True)
         self._min_ncc.setValue(float(self._settings.value("min_ncc", 0.02)))
+        self._automatic_ncc.setChecked(
+            self._settings.value("automatic_ncc", True, type=bool)
+        )
 
     def closeEvent(self, event) -> None:
         if self._worker and self._worker.isRunning():
@@ -422,6 +436,7 @@ class MainWindow(QWidget):
         self._settings.setValue("sample_duration", self._sample_duration.value())
         self._settings.setValue("sample_rate", self._rate_group.checkedId())
         self._settings.setValue("min_ncc", self._min_ncc.value())
+        self._settings.setValue("automatic_ncc", self._automatic_ncc.isChecked())
         super().closeEvent(event)
 
     # ── Tool startup check ────────────────────────────────────────────────────
@@ -751,6 +766,7 @@ class MainWindow(QWidget):
             src_ref_audio_index=self._src_ref_audio_index(),
             tgt_ref_audio_index=self._tgt_ref_audio_index(),
             min_ncc=self._min_ncc.value(),
+            automatic_ncc=self._automatic_ncc.isChecked(),
         )
 
         self._log_panel.show()
