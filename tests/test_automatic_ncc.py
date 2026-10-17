@@ -63,6 +63,41 @@ def test_automatic_consensus_rejects_strong_contradiction():
         _select_automatic_consensus(readings)
 
 
+def _terminator_readings(point4_offset):
+    # Real readings from RLM 7.1 remaster vs Tigole RM4K 5.1.
+    return [
+        _sample(480, -16062, ncc=0.214, prominence=0.67),
+        _sample(1605, -16030, ncc=0.344, prominence=0.90),
+        _sample(2569, -16069, ncc=0.132, prominence=0.56),
+        _sample(3854, point4_offset, ncc=0.213, prominence=0.89),
+        _sample(4817, -16067, ncc=0.243, prominence=0.94),
+    ]
+
+
+def test_automatic_consensus_tolerates_isolated_strong_blip():
+    warnings = []
+
+    selected = _select_automatic_consensus(
+        _terminator_readings(-16148), warn=warnings.append
+    )
+
+    assert [sample.offset_ms for sample in selected] == [-16062, -16030, -16069, -16067]
+    assert len(warnings) == 1 and "-16148" in warnings[0]
+
+
+def test_automatic_consensus_rejects_large_bracketed_conflict():
+    with pytest.raises(RuntimeError, match="Strong correlation readings contradict"):
+        _select_automatic_consensus(_terminator_readings(-18100))
+
+
+def test_automatic_consensus_rejects_strong_conflict_at_last_point():
+    readings = _terminator_readings(-16070)
+    readings[-1] = _sample(4817, -16150, ncc=0.243, prominence=0.94)
+
+    with pytest.raises(RuntimeError, match="Strong correlation readings contradict"):
+        _select_automatic_consensus(readings)
+
+
 def test_automatic_consensus_requires_three_agreeing_offsets():
     readings = [
         _sample(0, 0),

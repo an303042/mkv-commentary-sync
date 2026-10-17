@@ -71,6 +71,11 @@ AUTOMATIC_STRONG_NCC = 0.10
 PEAK_EXCLUSION_SECONDS = 1.0
 # Linear-fit residuals must be within this to trust the model
 CONSISTENCY_TOLERANCE_MS = 50
+# A strong outlier whose time neighbours both agree with the model cannot be a
+# lasting edit difference (that would shift every later point too). Up to this
+# deviation (~5 frames) it is treated as a misplaced peak, e.g. from different
+# audio mixes; beyond it, a pair of compensating edits is plausible enough to stop.
+ISOLATED_OUTLIER_MAX_MS = 200
 # Slope magnitude below this (ms/s) is treated as a constant offset, not drift
 DRIFT_THRESHOLD_MS_PER_S = 0.5
 MIN_RELIABLE_SAMPLES = 3
@@ -269,10 +274,27 @@ def _model_tolerance(
     )
 
 
+def _is_isolated_blip(
+    sample: OffsetSample,
+    samples: List[OffsetSample],
+    inliers: List[OffsetSample],
+    deviation_ms: float,
+) -> bool:
+    """True when the readings just before and after ``sample`` both agree with the model."""
+    if deviation_ms > ISOLATED_OUTLIER_MAX_MS:
+        return False
+    ordered = sorted(samples, key=lambda s: s.start)
+    idx = ordered.index(sample)
+    if idx == 0 or idx == len(ordered) - 1:
+        return False
+    return ordered[idx - 1] in inliers and ordered[idx + 1] in inliers
+
+
 def _select_automatic_consensus(
     samples: List[OffsetSample],
     fps_mismatch: bool = False,
     fps_predicted_slope: float = 0.0,
+    warn: Optional[Callable[[str], None]] = None,
 ) -> List[OffsetSample]:
     """Choose the best offset/drift consensus while rejecting unsafe conflicts."""
     _require_reliable_sample_count(len(samples), len(samples))
@@ -339,6 +361,25 @@ def _select_automatic_consensus(
         and sample.prominence >= AUTOMATIC_DISTINCTIVE_PROMINENCE
         and abs(sample.offset_ms - (slope * sample.start + intercept)) > tolerance
     ]
+    blips = [
+        sample
+        for sample in strong_conflicts
+        if _is_isolated_blip(
+            sample,
+            samples,
+            best,
+            abs(sample.offset_ms - (slope * sample.start + intercept)),
+        )
+    ]
+    strong_conflicts = [sample for sample in strong_conflicts if sample not in blips]
+    if blips and warn and not strong_conflicts:
+        for sample in blips:
+            deviation = sample.offset_ms - (slope * sample.start + intercept)
+            warn(
+                f"⚠ {sample.label}: {sample.offset_ms:+d} ms is {deviation:+.0f} ms off the "
+                "other readings, but the points before and after it agree — ignoring it "
+                "as a one-off misreading (not an edit difference)."
+            )
     if strong_conflicts:
         detail = "\n".join(
             f"  {sample.label}: {sample.offset_ms:+d} ms "
@@ -552,11 +593,12 @@ def detect_offset(
             good_samples,
             fps_mismatch=fps_mismatch,
             fps_predicted_slope=fps_predicted_slope,
+            warn=log,
         )
         if len(good_samples) < candidate_count:
             log(
                 f"⚠ Automatic validation discarded {candidate_count - len(good_samples)} "
-                "weak/ambiguous outlier(s); the remaining readings agree."
+                "outlier(s); the remaining readings agree."
             )
     else:
         _require_reliable_sample_count(len(good_samples), len(points))
